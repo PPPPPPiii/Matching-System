@@ -3,6 +3,10 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+from ngo_matching.google_forms import (
+    build_public_csv_url,
+    parse_google_form_rows,
+)
 from ngo_matching.matcher import MatchingEngine
 from ngo_matching.models import MatchingPolicy, Participant
 from ngo_matching.storage import DataStore
@@ -135,3 +139,66 @@ def test_single_controller_only_first_registration_wins() -> None:
 
         assert first is True
         assert second is False
+
+
+def test_google_forms_csv_url_builder() -> None:
+    sheet_url = (
+        "https://docs.google.com/spreadsheets/d/"
+        "abcDEF1234567890/edit?gid=987654321#gid=987654321"
+    )
+    csv_url = build_public_csv_url(sheet_url)
+    assert (
+        csv_url
+        == "https://docs.google.com/spreadsheets/d/abcDEF1234567890/export?format=csv&gid=987654321"
+    )
+
+
+def test_google_form_import_is_idempotent_by_record_key() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = str(Path(temp_dir) / "matching.sqlite")
+        store = DataStore(db_path=db_path)
+        source = "https://docs.google.com/spreadsheets/d/abc/export?format=csv&gid=0"
+        rows = [
+            {
+                "timestamp": "2026/04/07 10:00:00",
+                "email address": "alex@example.com",
+                "name": "Alex",
+                "age": "22",
+                "is emory student": "true",
+                "gender": "male",
+                "attendance experience": "false",
+                "ethnicity": "Asian",
+                "culture": "Korean",
+            },
+            {
+                "timestamp": "2026/04/07 10:01:00",
+                "email address": "jordan@example.com",
+                "name": "Jordan",
+                "age": "23",
+                "is emory student": "false",
+                "gender": "female",
+                "attendance experience": "true",
+                "ethnicity": "Latino",
+                "culture": "Mexican",
+            },
+        ]
+
+        parsed_once = parse_google_form_rows(source, rows)
+        imported_once = 0
+        for record_key, participant in parsed_once:
+            if store.add_participant_from_source(
+                participant, source=source, record_key=record_key
+            ):
+                imported_once += 1
+        assert imported_once == 2
+
+        parsed_twice = parse_google_form_rows(source, rows)
+        imported_twice = 0
+        for record_key, participant in parsed_twice:
+            if store.add_participant_from_source(
+                participant, source=source, record_key=record_key
+            ):
+                imported_twice += 1
+
+        assert imported_twice == 0
+        assert len(store.list_participants()) == 2

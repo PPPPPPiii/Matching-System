@@ -71,6 +71,33 @@ python3 -m ngo_matching set-policy \
 python3 -m ngo_matching run-match
 ```
 
+### 5. Import participants from Google Form responses
+
+1. In Google Forms, link responses to a Google Sheet.
+2. In Google Sheets, share the response sheet for viewing (so CSV export is readable).
+3. Run import from either sheet URL or direct CSV URL:
+
+```bash
+# Option A: pass the sheet URL
+python3 -m ngo_matching import-google-form \
+  --sheet-url "https://docs.google.com/spreadsheets/d/<SHEET_ID>/edit?gid=0"
+
+# Option B: pass direct CSV export URL
+python3 -m ngo_matching import-google-form \
+  --csv-url "https://docs.google.com/spreadsheets/d/<SHEET_ID>/export?format=csv&gid=0"
+```
+
+Expected Google Form column names (case-insensitive):
+- Name (or Full Name)
+- Age
+- Is Emory Student
+- Gender
+- Attendance Experience
+- Ethnicity
+- Culture
+
+Import is idempotent: previously imported response rows are skipped on re-run.
+
 Run with `--json` for machine-readable output.
 
 ## Testing

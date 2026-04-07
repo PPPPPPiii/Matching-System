@@ -5,6 +5,11 @@ import json
 from pathlib import Path
 from typing import Any, Dict
 
+from ngo_matching.google_forms import (
+    build_public_csv_url,
+    fetch_csv_rows,
+    parse_google_form_rows,
+)
 from ngo_matching.matcher import MatchingEngine
 from ngo_matching.models import MatchingPolicy, Participant, parse_bool
 from ngo_matching.storage import DataStore
@@ -121,6 +126,38 @@ def run_matching(args: argparse.Namespace) -> None:
     print(json.dumps(payload, indent=2))
 
 
+def import_google_form(args: argparse.Namespace) -> None:
+    repo = _repo_from_path(args.db_path)
+    csv_url = args.csv_url if args.csv_url else build_public_csv_url(args.sheet_url)
+    rows = fetch_csv_rows(csv_url)
+    parsed = parse_google_form_rows(csv_url, rows)
+
+    imported = 0
+    skipped = 0
+    for record_key, participant in parsed:
+        was_new = repo.add_participant_from_source(
+            participant,
+            source=csv_url,
+            record_key=record_key,
+        )
+        if was_new:
+            imported += 1
+        else:
+            skipped += 1
+
+    print(
+        json.dumps(
+            {
+                "source": csv_url,
+                "rows_read": len(rows),
+                "imported": imported,
+                "skipped_existing": skipped,
+            },
+            indent=2,
+        )
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="NGO participant matching system")
     parser.add_argument("--db-path", default=str(DEFAULT_DB))
@@ -167,6 +204,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     match_cmd = subparsers.add_parser("run-match")
     match_cmd.set_defaults(func=run_matching)
+
+    import_cmd = subparsers.add_parser("import-google-form")
+    import_source_group = import_cmd.add_mutually_exclusive_group(required=True)
+    import_source_group.add_argument(
+        "--sheet-url",
+        help="Public Google Sheets URL containing form responses.",
+    )
+    import_source_group.add_argument(
+        "--csv-url",
+        help="Direct CSV export URL.",
+    )
+    import_cmd.set_defaults(func=import_google_form)
     return parser
 
 
