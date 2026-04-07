@@ -24,24 +24,28 @@ programs.
 ## Quickstart
 
 ```bash
-python -m venv .venv
+python3 --version
+python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
-python -m ngo_matching --help
+python3 -m pip install -r requirements.txt
+python3 -m ngo_matching --help
 ```
+
+> This project requires **Python 3.9+**. On macOS, `python` may still point to
+> Python 2.7, so use `python3` explicitly.
 
 ## CLI Usage
 
 ### 1. Initialize storage and set controller key
 
 ```bash
-python -m ngo_matching init --controller-key "super-secret-key"
+python3 -m ngo_matching init --controller-key "super-secret-key"
 ```
 
 ### 2. Add participants
 
 ```bash
-python -m ngo_matching add-participant \
+python3 -m ngo_matching add-participant \
   --name "Alice" \
   --age 22 \
   --is-emory-student true \
@@ -54,7 +58,7 @@ python -m ngo_matching add-participant \
 ### 3. Update matching policy (controller only)
 
 ```bash
-python -m ngo_matching set-policy \
+python3 -m ngo_matching set-policy \
   --controller-key "super-secret-key" \
   --strict-diversity true \
   --max-age-gap 5 \
@@ -64,7 +68,7 @@ python -m ngo_matching set-policy \
 ### 4. Run a matching round
 
 ```bash
-python -m ngo_matching run-match
+python3 -m ngo_matching run-match
 ```
 
 Run with `--json` for machine-readable output.
@@ -72,5 +76,5 @@ Run with `--json` for machine-readable output.
 ## Testing
 
 ```bash
-pytest -q
+python3 -m pytest -q
 ```
