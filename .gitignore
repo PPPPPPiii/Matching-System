@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+data/*.db
+data/*.sqlite3
+data/*.events.jsonl

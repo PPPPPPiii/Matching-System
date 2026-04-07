@@ -1,0 +1,2 @@
+"""NGO matching system package."""
+
