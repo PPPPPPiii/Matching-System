@@ -299,3 +299,44 @@ def test_second_round_prefers_new_people_when_possible() -> None:
         }
 
         assert round1_pairs.isdisjoint(round2_pairs)
+
+
+def test_score_breakdown_sums_to_group_score_for_pair() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = str(Path(temp_dir) / "matching.sqlite")
+        store = DataStore(db_path=db_path)
+        engine = MatchingEngine(store)
+
+        store.add_participant(
+            _participant("A", 20, "male", False, "Asian", "Korean", emory=True)
+        )
+        store.add_participant(
+            _participant("B", 21, "female", True, "Latino", "Mexican", emory=False)
+        )
+
+        result = engine.run_round()
+        assert len(result.groups) == 1
+        group = result.groups[0]
+        assert len(group.participants) == 2
+        assert round(sum(group.score_breakdown.values()), 3) == group.score
+
+
+def test_dry_run_does_not_persist_round_history() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = str(Path(temp_dir) / "matching.sqlite")
+        store = DataStore(db_path=db_path)
+        engine = MatchingEngine(store)
+
+        store.add_participant(_participant("A", 20, "male", False, "Asian", "Korean"))
+        store.add_participant(_participant("B", 21, "female", True, "Latino", "Mexican"))
+
+        counts_before = store.get_pair_match_counts()
+        assert counts_before == {}
+
+        _ = engine.run_round(persist=False)
+        counts_after_dry_run = store.get_pair_match_counts()
+        assert counts_after_dry_run == {}
+
+        _ = engine.run_round(persist=True)
+        counts_after_real = store.get_pair_match_counts()
+        assert len(counts_after_real) == 1

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
+import sys
 from pathlib import Path
 from typing import Any, Dict
 
@@ -16,10 +18,89 @@ from ngo_matching.storage import DataStore
 
 
 DEFAULT_DB = Path("data/ngo_matching.db")
+_ANSI_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
+_MEMBER_COLORS = [
+    "\033[96m",  # cyan
+    "\033[95m",  # magenta
+    "\033[94m",  # blue
+    "\033[92m",  # green
+    "\033[93m",  # yellow
+]
+_ANSI_RESET = "\033[0m"
 
 
 def _repo_from_path(path: str) -> DataStore:
     return DataStore(db_path=path)
+
+
+def _supports_color() -> bool:
+    return bool(getattr(sys.stdout, "isatty", lambda: False)())
+
+
+def _visible_width(value: str) -> int:
+    return len(_ANSI_PATTERN.sub("", value))
+
+
+def _pad_cell(value: str, width: int) -> str:
+    return value + (" " * max(width - _visible_width(value), 0))
+
+
+def _colorize_member(name: str, index: int, enabled: bool) -> str:
+    if not enabled:
+        return name
+    color = _MEMBER_COLORS[index % len(_MEMBER_COLORS)]
+    return f"{color}{name}{_ANSI_RESET}"
+
+
+def _format_breakdown(score_breakdown: Dict[str, float]) -> str:
+    ordered = [
+        "attendance_experience",
+        "culture",
+        "ethnicity",
+        "age",
+        "gender",
+        "is_emory_student",
+        "new_partner_bonus",
+        "rematch_penalty",
+    ]
+    keys = [k for k in ordered if k in score_breakdown] + [
+        k for k in score_breakdown.keys() if k not in ordered
+    ]
+    return ", ".join(f"{k}={score_breakdown[k]:+.2f}" for k in keys)
+
+
+def _score_formula() -> Dict[str, str]:
+    return {
+        "attendance_experience": "+experience_mix_weight if mixed, else -0.4 * experience_mix_weight",
+        "culture": "+culture_weight when different",
+        "ethnicity": "+ethnicity_weight when different",
+        "age": "+age_weight * max(max_age_gap - age_gap, 0) / max_age_gap",
+        "gender": "+gender_weight when different",
+        "is_emory_student": "+0.5 when different",
+        "new_partner_bonus": "+3.0 if pair has never matched before",
+        "rematch_penalty": "-50.0 * times_matched_before",
+        "strictness_fallback": "Relax in this order when needed: attendance -> culture -> ethnicity -> age -> gender -> is_emory_student",
+        "rematch_priority": "Avoid rematch first; only allow rematch when no sufficient non-rematch grouping exists",
+    }
+
+
+def _print_table(headers: list[str], rows: list[list[str]]) -> None:
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for idx, cell in enumerate(row):
+            widths[idx] = max(widths[idx], _visible_width(cell))
+
+    horizontal = "+-" + "-+-".join("-" * w for w in widths) + "-+"
+    print(horizontal)
+    print("| " + " | ".join(_pad_cell(h, widths[i]) for i, h in enumerate(headers)) + " |")
+    print(horizontal)
+    for row in rows:
+        print(
+            "| "
+            + " | ".join(_pad_cell(cell, widths[i]) for i, cell in enumerate(row))
+            + " |"
+        )
+    print(horizontal)
 
 
 def register_participant(args: argparse.Namespace) -> None:
@@ -108,27 +189,69 @@ def update_policy(args: argparse.Namespace) -> None:
 def run_matching(args: argparse.Namespace) -> None:
     repo = _repo_from_path(args.db_path)
     engine = MatchingEngine(repo)
-    result = engine.run_round()
+    result = engine.run_round(persist=not args.dry_run)
     rows = []
+    use_color = bool(args.color_members) and _supports_color()
     for index, group in enumerate(result.groups, start=1):
-        names = [p.name for p in group.participants]
-        rows.append(
-            {
-                "group": index,
-                "size": len(group.participants),
-                "members": names,
-                "score": group.score,
+        names = [
+            _colorize_member(p.name, idx, use_color)
+            for idx, p in enumerate(group.participants)
+        ]
+        base_row = {
+            "group": index,
+            "size": len(group.participants),
+            "members": names,
+            "score": group.score,
+        }
+        if args.show_score_details:
+            base_row["score_breakdown"] = {
+                key: round(value, 3) for key, value in group.score_breakdown.items()
             }
-        )
+            base_row["reasons"] = group.reasons
+        rows.append(base_row)
 
-    payload = {
-        "group_count": len(result.groups),
-        "strictness_level": result.strictness_level,
-        "used_rematch": result.used_rematch,
-        "match_table": rows,
-        "unmatched": [p.name for p in result.unmatched],
-    }
-    print(json.dumps(payload, indent=2))
+    if args.json:
+        payload = {
+            "group_count": len(result.groups),
+            "strictness_level": result.strictness_level,
+            "used_rematch": result.used_rematch,
+            "match_table": rows,
+            "unmatched": [p.name for p in result.unmatched],
+        }
+        if args.show_score_details:
+            payload["score_formula"] = _score_formula()
+        print(json.dumps(payload, indent=2))
+        return
+
+    table_rows: list[list[str]] = []
+    for row in rows:
+        line = [
+            str(row["group"]),
+            str(row["size"]),
+            ", ".join(row["members"]),
+            f"{float(row['score']):.3f}",
+        ]
+        if args.show_score_details:
+            line.append(_format_breakdown(row.get("score_breakdown", {})))
+        table_rows.append(line)
+
+    headers = ["Group", "Size", "Members", "Score"]
+    if args.show_score_details:
+        headers.append("Score Breakdown")
+
+    print(
+        f"Round result: groups={len(result.groups)}, unmatched={len(result.unmatched)}, "
+        f"strictness_level={result.strictness_level}, used_rematch={result.used_rematch}"
+    )
+    if args.show_score_details:
+        print("Score formula:")
+        for key, detail in _score_formula().items():
+            print(f"- {key}: {detail}")
+    _print_table(headers, table_rows)
+    if args.dry_run:
+        print("Dry run only: this round was NOT saved to history.")
+    if result.unmatched:
+        print("Unmatched:", ", ".join(p.name for p in result.unmatched))
 
 
 def import_google_form(args: argparse.Namespace) -> None:
@@ -208,6 +331,23 @@ def build_parser() -> argparse.ArgumentParser:
     policy_cmd.set_defaults(func=update_policy)
 
     match_cmd = subparsers.add_parser("run-match")
+    match_cmd.add_argument("--json", action="store_true", help="Print JSON output.")
+    match_cmd.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview matches without saving this round into history.",
+    )
+    match_cmd.add_argument(
+        "--show-score-details",
+        action="store_true",
+        help="Include score formula and component breakdown details.",
+    )
+    match_cmd.add_argument(
+        "--color-members",
+        type=parse_bool,
+        default=True,
+        help="Enable ANSI colors for member names in table output (default: true).",
+    )
     match_cmd.set_defaults(func=run_matching)
 
     import_cmd = subparsers.add_parser("import-google-form")

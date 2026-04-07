@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from itertools import combinations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from ngo_matching.models import MatchingPolicy, Participant
@@ -15,6 +15,7 @@ class MatchGroup:
     reasons: List[str]
     strictness_level: int
     used_rematch: bool
+    score_breakdown: Dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -53,9 +54,10 @@ def _evaluate_pair(
     strictness_level: int,
     allow_rematch: bool,
     pair_history_count: int,
-) -> tuple[float, list[str]]:
+) -> tuple[float, list[str], Dict[str, float]]:
     required = _active_required_dimensions(strictness_level)
     reasons: list[str] = []
+    components: Dict[str, float] = {}
 
     attendance_mixed = a.attendance_experience != b.attendance_experience
     culture_diff = a.culture != b.culture
@@ -75,47 +77,68 @@ def _evaluate_pair(
     }
     for key in required:
         if not checks[key]:
-            return float("-inf"), [f"failed required dimension: {key}"]
+            return float("-inf"), [f"failed required dimension: {key}"], {}
 
     if pair_history_count > 0 and not allow_rematch:
-        return float("-inf"), ["rematch blocked"]
+        return float("-inf"), ["rematch blocked"], {}
 
     # Score as weighted preference, not a hard constraint.
     score = 0.0
     if attendance_mixed:
-        score += policy.experience_mix_weight
+        attendance_points = policy.experience_mix_weight
+        score += attendance_points
+        components["attendance_experience"] = attendance_points
         reasons.append("mixed experience")
     else:
-        score -= policy.experience_mix_weight * 0.4
+        attendance_points = -(policy.experience_mix_weight * 0.4)
+        score += attendance_points
+        components["attendance_experience"] = attendance_points
         reasons.append("same experience")
 
     if culture_diff:
+        components["culture"] = policy.culture_weight
         score += policy.culture_weight
         reasons.append("different culture")
+    else:
+        components["culture"] = 0.0
     if ethnicity_diff:
+        components["ethnicity"] = policy.ethnicity_weight
         score += policy.ethnicity_weight
         reasons.append("different ethnicity")
+    else:
+        components["ethnicity"] = 0.0
     if gender_diff:
+        components["gender"] = policy.gender_weight
         score += policy.gender_weight
         reasons.append("different gender")
+    else:
+        components["gender"] = 0.0
     if emory_diff:
+        components["is_emory_student"] = 0.5
         score += 0.5
         reasons.append("different emory status")
+    else:
+        components["is_emory_student"] = 0.0
 
     age_points = max(policy.max_age_gap - age_gap, 0) / max(policy.max_age_gap, 1)
-    score += age_points * policy.age_weight
+    age_component = age_points * policy.age_weight
+    components["age"] = age_component
+    score += age_component
     reasons.append(f"age gap {age_gap}")
 
     # Prefer people who have not talked before. This is soft because rematches
     # are allowed only when no non-rematch full solution exists.
     if pair_history_count == 0:
+        components["new_partner_bonus"] = 3.0
         score += 3.0
         reasons.append("new partner")
     else:
-        score -= 50.0 * pair_history_count
+        rematch_penalty = -(50.0 * pair_history_count)
+        components["rematch_penalty"] = rematch_penalty
+        score += rematch_penalty
         reasons.append(f"rematch x{pair_history_count}")
 
-    return score, reasons
+    return score, reasons, components
 
 
 def _greedy_groups_for_level(
@@ -128,8 +151,8 @@ def _greedy_groups_for_level(
 ) -> MatchRoundResult:
     by_id: Dict[str, Participant] = {p.participant_id: p for p in participants}
     ids = list(by_id.keys())
-    pair_scores: Dict[tuple[str, str], tuple[float, list[str], int]] = {}
-    scored_pairs: list[tuple[float, str, str, list[str], int]] = []
+    pair_scores: Dict[tuple[str, str], tuple[float, list[str], int, Dict[str, float]]] = {}
+    scored_pairs: list[tuple[float, str, str, list[str], int, Dict[str, float]]] = []
 
     for i in range(len(ids)):
         for j in range(i + 1, len(ids)):
@@ -137,7 +160,7 @@ def _greedy_groups_for_level(
             p2 = by_id[ids[j]]
             key = _pair_key(p1.participant_id, p2.participant_id)
             history_count = pair_history_counts.get(key, 0)
-            score, reasons = _evaluate_pair(
+            score, reasons, components = _evaluate_pair(
                 p1,
                 p2,
                 policy=policy,
@@ -147,15 +170,22 @@ def _greedy_groups_for_level(
             )
             if score == float("-inf"):
                 continue
-            row = (score, p1.participant_id, p2.participant_id, reasons, history_count)
-            pair_scores[key] = (score, reasons, history_count)
+            row = (
+                score,
+                p1.participant_id,
+                p2.participant_id,
+                reasons,
+                history_count,
+                components,
+            )
+            pair_scores[key] = (score, reasons, history_count, components)
             scored_pairs.append(row)
 
     scored_pairs.sort(key=lambda row: row[0], reverse=True)
     used_ids: set[str] = set()
     groups: list[MatchGroup] = []
 
-    for score, a_id, b_id, reasons, history_count in scored_pairs:
+    for score, a_id, b_id, reasons, history_count, components in scored_pairs:
         if a_id in used_ids or b_id in used_ids:
             continue
         used_ids.add(a_id)
@@ -167,6 +197,7 @@ def _greedy_groups_for_level(
                 reasons=reasons,
                 strictness_level=strictness_level,
                 used_rematch=history_count > 0,
+                score_breakdown=components,
             )
         )
 
@@ -216,6 +247,18 @@ def _greedy_groups_for_level(
                 reasons=original.reasons + [best_reason],
                 strictness_level=strictness_level,
                 used_rematch=best_used_rematch,
+                score_breakdown={
+                    key: (
+                        original.score_breakdown.get(key, 0.0)
+                        + pair_scores[key1][3].get(key, 0.0)
+                        + pair_scores[key2][3].get(key, 0.0)
+                    )
+                    for key in {
+                        *original.score_breakdown.keys(),
+                        *pair_scores[key1][3].keys(),
+                        *pair_scores[key2][3].keys(),
+                    }
+                },
             )
             unmatched_ids = []
 
@@ -286,7 +329,7 @@ class MatchingEngine:
         policy = self.policy or MatchingPolicy()
         return create_matches(participants, policy, self.pair_history_counts)
 
-    def run_round(self) -> MatchRoundResult:
+    def run_round(self, *, persist: bool = True) -> MatchRoundResult:
         if self.store is None:
             raise ValueError("run_round requires a DataStore-backed engine")
 
@@ -305,5 +348,6 @@ class MatchingEngine:
             for group in result.groups
             for i, j in combinations(range(len(group.participants)), 2)
         ]
-        self.store.record_round(round_payload)
+        if persist:
+            self.store.record_round(round_payload)
         return result

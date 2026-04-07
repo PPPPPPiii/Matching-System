@@ -71,6 +71,18 @@ python3 -m ngo_matching set-policy \
 python3 -m ngo_matching run-match
 ```
 
+Print a table with score component details:
+
+```bash
+python3 -m ngo_matching run-match --show-score-details
+```
+
+Preview a round without saving it to history (useful if participants are still being added):
+
+```bash
+python3 -m ngo_matching run-match --dry-run
+```
+
 ### 5. Import participants from Google Form responses
 
 1. In Google Forms, link responses to a Google Sheet.
