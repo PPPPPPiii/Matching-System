@@ -75,6 +75,25 @@ def update_policy(args: argparse.Namespace) -> None:
         else:
             raise ValueError(f"Unsupported policy key: {key}")
 
+    # Also support direct flags (e.g. --strict-diversity true).
+    direct_updates = {
+        "prefer_different_ethnicity": args.prefer_different_ethnicity,
+        "prefer_different_culture": args.prefer_different_culture,
+        "prefer_different_gender": args.prefer_different_gender,
+        "require_experience_mix": args.require_experience_mix,
+        "strict_diversity": args.strict_diversity,
+        "strict_age_gap": args.strict_age_gap,
+        "max_age_gap": args.max_age_gap,
+        "ethnicity_weight": args.ethnicity_weight,
+        "culture_weight": args.culture_weight,
+        "gender_weight": args.gender_weight,
+        "experience_mix_weight": args.experience_mix_weight,
+        "age_weight": args.age_weight,
+    }
+    for key, value in direct_updates.items():
+        if value is not None:
+            updates[key] = value
+
     ok = repo.set_policy(args.controller_key, updates)
     if not ok:
         raise SystemExit("controller key invalid or controller not configured")
@@ -132,6 +151,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="Policy update in key=value form. Repeat for multiple fields.",
     )
+    policy_cmd.add_argument("--prefer-different-ethnicity", type=parse_bool)
+    policy_cmd.add_argument("--prefer-different-culture", type=parse_bool)
+    policy_cmd.add_argument("--prefer-different-gender", type=parse_bool)
+    policy_cmd.add_argument("--require-experience-mix", type=parse_bool)
+    policy_cmd.add_argument("--strict-diversity", type=parse_bool)
+    policy_cmd.add_argument("--strict-age-gap", type=parse_bool)
+    policy_cmd.add_argument("--max-age-gap", type=int)
+    policy_cmd.add_argument("--ethnicity-weight", type=float)
+    policy_cmd.add_argument("--culture-weight", type=float)
+    policy_cmd.add_argument("--gender-weight", type=float)
+    policy_cmd.add_argument("--experience-mix-weight", type=float)
+    policy_cmd.add_argument("--age-weight", type=float)
     policy_cmd.set_defaults(func=update_policy)
 
     match_cmd = subparsers.add_parser("run-match")
