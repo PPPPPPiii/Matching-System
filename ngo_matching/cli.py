@@ -108,20 +108,25 @@ def update_policy(args: argparse.Namespace) -> None:
 def run_matching(args: argparse.Namespace) -> None:
     repo = _repo_from_path(args.db_path)
     engine = MatchingEngine(repo)
-    pairs, unmatched = engine.run_round()
-    payload = {
-        "pair_count": len(pairs),
-        "pairs": [
+    result = engine.run_round()
+    rows = []
+    for index, group in enumerate(result.groups, start=1):
+        names = [p.name for p in group.participants]
+        rows.append(
             {
-                "left_id": pair.participant_one.participant_id,
-                "left_name": pair.participant_one.name,
-                "right_id": pair.participant_two.participant_id,
-                "right_name": pair.participant_two.name,
-                "score": pair.score,
+                "group": index,
+                "size": len(group.participants),
+                "members": names,
+                "score": group.score,
             }
-            for pair in pairs
-        ],
-        "unmatched": [p.to_dict() for p in unmatched],
+        )
+
+    payload = {
+        "group_count": len(result.groups),
+        "strictness_level": result.strictness_level,
+        "used_rematch": result.used_rematch,
+        "match_table": rows,
+        "unmatched": [p.name for p in result.unmatched],
     }
     print(json.dumps(payload, indent=2))
 

@@ -303,6 +303,19 @@ class DataStore:
             rows = conn.execute("SELECT participant_a, participant_b FROM pair_history").fetchall()
         return {_pair_tuple(row["participant_a"], row["participant_b"]) for row in rows}
 
+    def get_pair_match_counts(self) -> Dict[Tuple[str, str], int]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT participant_a, participant_b, times_matched
+                FROM pair_history
+                """
+            ).fetchall()
+        return {
+            _pair_tuple(row["participant_a"], row["participant_b"]): int(row["times_matched"])
+            for row in rows
+        }
+
     def record_round(self, pairs: Sequence[Tuple[str, str, float, str]]) -> int:
         with self._connect() as conn:
             round_id = conn.execute(
