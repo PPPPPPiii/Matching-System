@@ -111,6 +111,14 @@ class DataStore:
                     payload_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS ingestion_records (
+                    source TEXT NOT NULL,
+                    record_key TEXT NOT NULL,
+                    participant_id TEXT NOT NULL,
+                    imported_at TEXT NOT NULL,
+                    PRIMARY KEY (source, record_key)
+                );
                 """
             )
 
@@ -187,6 +195,55 @@ class DataStore:
             )
         self._append_event("participant_signup", participant.to_dict())
 
+    def add_participant_from_source(
+        self,
+        participant: Participant,
+        *,
+        source: str,
+        record_key: str,
+    ) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO ingestion_records (
+                    source, record_key, participant_id, imported_at
+                )
+                VALUES (?, ?, ?, ?)
+                """,
+                (source, record_key, participant.participant_id, _utc_now()),
+            )
+            if cursor.rowcount == 0:
+                return False
+            conn.execute(
+                """
+                INSERT INTO participants (
+                    participant_id, name, age, is_emory_student, gender,
+                    attendance_experience, ethnicity, culture, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    participant.participant_id,
+                    participant.name,
+                    participant.age,
+                    int(participant.is_emory_student),
+                    participant.gender,
+                    int(participant.attendance_experience),
+                    participant.ethnicity,
+                    participant.culture,
+                    participant.created_at,
+                ),
+            )
+        self._append_event(
+            "participant_imported",
+            {
+                "source": source,
+                "record_key": record_key,
+                "participant": participant.to_dict(),
+            },
+        )
+        return True
+
     def list_participants(self) -> List[Participant]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -245,6 +302,19 @@ class DataStore:
         with self._connect() as conn:
             rows = conn.execute("SELECT participant_a, participant_b FROM pair_history").fetchall()
         return {_pair_tuple(row["participant_a"], row["participant_b"]) for row in rows}
+
+    def get_pair_match_counts(self) -> Dict[Tuple[str, str], int]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT participant_a, participant_b, times_matched
+                FROM pair_history
+                """
+            ).fetchall()
+        return {
+            _pair_tuple(row["participant_a"], row["participant_b"]): int(row["times_matched"])
+            for row in rows
+        }
 
     def record_round(self, pairs: Sequence[Tuple[str, str, float, str]]) -> int:
         with self._connect() as conn:

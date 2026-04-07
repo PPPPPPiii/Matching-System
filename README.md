@@ -24,24 +24,28 @@ programs.
 ## Quickstart
 
 ```bash
-python -m venv .venv
+python3 --version
+python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
-python -m ngo_matching --help
+python3 -m pip install -r requirements.txt
+python3 -m ngo_matching --help
 ```
+
+> This project requires **Python 3.9+**. On macOS, `python` may still point to
+> Python 2.7, so use `python3` explicitly.
 
 ## CLI Usage
 
 ### 1. Initialize storage and set controller key
 
 ```bash
-python -m ngo_matching init --controller-key "super-secret-key"
+python3 -m ngo_matching init --controller-key "super-secret-key"
 ```
 
 ### 2. Add participants
 
 ```bash
-python -m ngo_matching add-participant \
+python3 -m ngo_matching add-participant \
   --name "Alice" \
   --age 22 \
   --is-emory-student true \
@@ -54,7 +58,7 @@ python -m ngo_matching add-participant \
 ### 3. Update matching policy (controller only)
 
 ```bash
-python -m ngo_matching set-policy \
+python3 -m ngo_matching set-policy \
   --controller-key "super-secret-key" \
   --strict-diversity true \
   --max-age-gap 5 \
@@ -64,13 +68,52 @@ python -m ngo_matching set-policy \
 ### 4. Run a matching round
 
 ```bash
-python -m ngo_matching run-match
+python3 -m ngo_matching run-match
 ```
+
+Print a table with score component details:
+
+```bash
+python3 -m ngo_matching run-match --show-score-details
+```
+
+Preview a round without saving it to history (useful if participants are still being added):
+
+```bash
+python3 -m ngo_matching run-match --dry-run
+```
+
+### 5. Import participants from Google Form responses
+
+1. In Google Forms, link responses to a Google Sheet.
+2. In Google Sheets, share the response sheet for viewing (so CSV export is readable).
+3. Run import from either sheet URL or direct CSV URL:
+
+```bash
+# Option A: pass the sheet URL
+python3 -m ngo_matching import-google-form \
+  --sheet-url "https://docs.google.com/spreadsheets/d/<SHEET_ID>/edit?gid=0"
+
+# Option B: pass direct CSV export URL
+python3 -m ngo_matching import-google-form \
+  --csv-url "https://docs.google.com/spreadsheets/d/<SHEET_ID>/export?format=csv&gid=0"
+```
+
+Expected Google Form column names (case-insensitive):
+- Name (or Full Name)
+- Age
+- Is Emory Student
+- Gender
+- Attendance Experience
+- Ethnicity
+- Culture
+
+Import is idempotent: previously imported response rows are skipped on re-run.
 
 Run with `--json` for machine-readable output.
 
 ## Testing
 
 ```bash
-pytest -q
+python3 -m pytest -q
 ```
