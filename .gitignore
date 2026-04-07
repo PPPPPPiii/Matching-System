@@ -3,3 +3,4 @@ __pycache__/
 .pytest_cache/
 data/*.db
 data/*.sqlite3
+data/*.events.jsonl
