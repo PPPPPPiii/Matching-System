@@ -75,6 +75,10 @@ Optional flags for this command:
 - `--show-score-details`: print score formula and score component breakdown.
 - `--dry-run`: preview matching without saving the round to history.
 
+```bash
+python3 -m ngo_matching run-match --dry-run
+```
+
 ### 5. Import participants from Google Form responses
 
 1. In Google Forms, link responses to a Google Sheet.
