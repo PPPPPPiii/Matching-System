@@ -27,6 +27,10 @@ def _hash_secret(secret: str) -> str:
     return hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
 
+def _name_key(name: str) -> str:
+    return " ".join(name.strip().lower().split())
+
+
 class DataStore:
     def __init__(
         self,
@@ -119,6 +123,28 @@ class DataStore:
                     imported_at TEXT NOT NULL,
                     PRIMARY KEY (source, record_key)
                 );
+
+                CREATE TABLE IF NOT EXISTS participant_match_history (
+                    person_id TEXT NOT NULL,
+                    matched_with_id TEXT NOT NULL,
+                    round_id INTEGER NOT NULL,
+                    matched_at TEXT NOT NULL,
+                    score REAL NOT NULL,
+                    rationale TEXT NOT NULL,
+                    PRIMARY KEY (person_id, matched_with_id, round_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS current_matching_table (
+                    round_id INTEGER NOT NULL,
+                    group_index INTEGER NOT NULL,
+                    participant_id TEXT NOT NULL,
+                    member_order INTEGER NOT NULL,
+                    group_size INTEGER NOT NULL,
+                    score REAL NOT NULL,
+                    reasons_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (group_index, participant_id)
+                );
                 """
             )
 
@@ -171,8 +197,25 @@ class DataStore:
             return False
         return row["secret_hash"] == _hash_secret(controller_secret)
 
-    def add_participant(self, participant: Participant) -> None:
-        with self._connect() as conn:
+    def _find_participant_by_name_ci(
+        self, conn: sqlite3.Connection, name: str
+    ) -> Optional[sqlite3.Row]:
+        return conn.execute(
+            """
+            SELECT participant_id, name
+            FROM participants
+            WHERE lower(name) = ?
+            ORDER BY created_at ASC
+            LIMIT 1
+            """,
+            (_name_key(name),),
+        ).fetchone()
+
+    def _upsert_participant_by_name(
+        self, conn: sqlite3.Connection, participant: Participant
+    ) -> Dict[str, Any]:
+        existing = self._find_participant_by_name_ci(conn, participant.name)
+        if existing is None:
             conn.execute(
                 """
                 INSERT INTO participants (
@@ -193,7 +236,55 @@ class DataStore:
                     participant.created_at,
                 ),
             )
-        self._append_event("participant_signup", participant.to_dict())
+            return {
+                "participant_id": participant.participant_id,
+                "name": participant.name,
+                "action": "created",
+            }
+
+        participant_id = str(existing["participant_id"])
+        conn.execute(
+            """
+            UPDATE participants
+            SET name = ?, age = ?, is_emory_student = ?, gender = ?,
+                attendance_experience = ?, ethnicity = ?, culture = ?, created_at = ?
+            WHERE participant_id = ?
+            """,
+            (
+                participant.name,
+                participant.age,
+                int(participant.is_emory_student),
+                participant.gender,
+                int(participant.attendance_experience),
+                participant.ethnicity,
+                participant.culture,
+                participant.created_at,
+                participant_id,
+            ),
+        )
+        return {
+            "participant_id": participant_id,
+            "name": participant.name,
+            "action": "updated",
+        }
+
+    def add_participant(self, participant: Participant) -> Dict[str, Any]:
+        with self._connect() as conn:
+            result = self._upsert_participant_by_name(conn, participant)
+        event_type = (
+            "participant_signup"
+            if result["action"] == "created"
+            else "participant_updated_by_name_ci"
+        )
+        self._append_event(
+            event_type,
+            {
+                "participant_id": result["participant_id"],
+                "name": result["name"],
+                "data": participant.to_dict(),
+            },
+        )
+        return result
 
     def add_participant_from_source(
         self,
@@ -203,35 +294,30 @@ class DataStore:
         record_key: str,
     ) -> bool:
         with self._connect() as conn:
-            cursor = conn.execute(
+            existing = conn.execute(
                 """
-                INSERT OR IGNORE INTO ingestion_records (
+                SELECT participant_id
+                FROM ingestion_records
+                WHERE source = ? AND record_key = ?
+                """,
+                (source, record_key),
+            ).fetchone()
+            if existing is not None:
+                return False
+
+            result = self._upsert_participant_by_name(conn, participant)
+            conn.execute(
+                """
+                INSERT INTO ingestion_records (
                     source, record_key, participant_id, imported_at
                 )
                 VALUES (?, ?, ?, ?)
                 """,
-                (source, record_key, participant.participant_id, _utc_now()),
-            )
-            if cursor.rowcount == 0:
-                return False
-            conn.execute(
-                """
-                INSERT INTO participants (
-                    participant_id, name, age, is_emory_student, gender,
-                    attendance_experience, ethnicity, culture, created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
                 (
-                    participant.participant_id,
-                    participant.name,
-                    participant.age,
-                    int(participant.is_emory_student),
-                    participant.gender,
-                    int(participant.attendance_experience),
-                    participant.ethnicity,
-                    participant.culture,
-                    participant.created_at,
+                    source,
+                    record_key,
+                    result["participant_id"],
+                    _utc_now(),
                 ),
             )
         self._append_event(
@@ -239,6 +325,7 @@ class DataStore:
             {
                 "source": source,
                 "record_key": record_key,
+                "action": result["action"],
                 "participant": participant.to_dict(),
             },
         )
@@ -317,10 +404,11 @@ class DataStore:
         }
 
     def record_round(self, pairs: Sequence[Tuple[str, str, float, str]]) -> int:
+        matched_at = _utc_now()
         with self._connect() as conn:
             round_id = conn.execute(
                 "INSERT INTO match_rounds (run_at) VALUES (?)",
-                (_utc_now(),),
+                (matched_at,),
             ).lastrowid
 
             for a, b, score, rationale in pairs:
@@ -344,12 +432,132 @@ class DataStore:
                     """,
                     (_pair_key(x, y), x, y, round_id, round_id),
                 )
+                conn.execute(
+                    """
+                    INSERT INTO participant_match_history (
+                        person_id, matched_with_id, round_id, matched_at, score, rationale
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        x,
+                        y,
+                        round_id,
+                        matched_at,
+                        float(score),
+                        rationale,
+                        y,
+                        x,
+                        round_id,
+                        matched_at,
+                        float(score),
+                        rationale,
+                    ),
+                )
 
         self._append_event(
             "matching_round",
             {"round_id": int(round_id), "pair_count": len(pairs)},
         )
         return int(round_id)
+
+    def replace_current_matching_table(
+        self,
+        *,
+        round_id: int,
+        rows: Sequence[Tuple[int, str, int, int, float, str]],
+    ) -> None:
+        updated_at = _utc_now()
+        with self._connect() as conn:
+            conn.execute("DELETE FROM current_matching_table")
+            for group_index, participant_id, member_order, group_size, score, reasons_json in rows:
+                conn.execute(
+                    """
+                    INSERT INTO current_matching_table (
+                        round_id, group_index, participant_id, member_order,
+                        group_size, score, reasons_json, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        int(round_id),
+                        int(group_index),
+                        participant_id,
+                        int(member_order),
+                        int(group_size),
+                        float(score),
+                        reasons_json,
+                        updated_at,
+                    ),
+                )
+        self._append_event(
+            "current_matching_table_replaced",
+            {"round_id": int(round_id), "row_count": len(rows)},
+        )
+
+    def reset_matching_table(self, controller_secret: str) -> bool:
+        if not self._verify_controller(controller_secret):
+            return False
+        with self._connect() as conn:
+            conn.execute("DELETE FROM current_matching_table")
+        self._append_event("current_matching_table_reset", {})
+        return True
+
+    def list_current_matching_table(self) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT cmt.round_id, cmt.group_index, cmt.participant_id,
+                       cmt.member_order, cmt.group_size, cmt.score, cmt.reasons_json,
+                       cmt.updated_at, p.name
+                FROM current_matching_table cmt
+                JOIN participants p ON p.participant_id = cmt.participant_id
+                ORDER BY cmt.group_index ASC, cmt.member_order ASC
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_participant_profile(self, name: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as conn:
+            person = conn.execute(
+                """
+                SELECT participant_id, name, age, is_emory_student, gender,
+                       attendance_experience, ethnicity, culture, created_at
+                FROM participants
+                WHERE lower(name) = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (_name_key(name),),
+            ).fetchone()
+            if person is None:
+                return None
+            history_rows = conn.execute(
+                """
+                SELECT pmh.round_id, pmh.matched_at, pmh.score, pmh.rationale,
+                       p.name AS matched_with_name, p.participant_id AS matched_with_id
+                FROM participant_match_history pmh
+                JOIN participants p ON p.participant_id = pmh.matched_with_id
+                WHERE pmh.person_id = ?
+                ORDER BY pmh.round_id DESC, pmh.matched_with_id ASC
+                """,
+                (person["participant_id"],),
+            ).fetchall()
+
+        return {
+            "participant": {
+                "participant_id": person["participant_id"],
+                "name": person["name"],
+                "age": int(person["age"]),
+                "is_emory_student": bool(person["is_emory_student"]),
+                "gender": person["gender"],
+                "attendance_experience": bool(person["attendance_experience"]),
+                "ethnicity": person["ethnicity"],
+                "culture": person["culture"],
+                "created_at": person["created_at"],
+            },
+            "match_history": [dict(row) for row in history_rows],
+        }
 
     def list_pair_history(self) -> List[Dict[str, Any]]:
         with self._connect() as conn:

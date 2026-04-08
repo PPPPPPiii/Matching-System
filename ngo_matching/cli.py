@@ -114,8 +114,16 @@ def register_participant(args: argparse.Namespace) -> None:
         ethnicity=args.ethnicity,
         culture=args.culture,
     )
-    repo.add_participant(participant)
-    print(json.dumps({"participant_id": participant.participant_id, "name": participant.name}))
+    result = repo.add_participant(participant)
+    print(
+        json.dumps(
+            {
+                "participant_id": result["participant_id"],
+                "name": result["name"],
+                "action": result["action"],
+            }
+        )
+    )
 
 
 def list_participants(args: argparse.Namespace) -> None:
@@ -254,6 +262,29 @@ def run_matching(args: argparse.Namespace) -> None:
         print("Unmatched:", ", ".join(p.name for p in result.unmatched))
 
 
+def reset_matching_table(args: argparse.Namespace) -> None:
+    repo = _repo_from_path(args.db_path)
+    ok = repo.reset_matching_table(args.controller_key)
+    if not ok:
+        raise SystemExit("controller key invalid or controller not configured")
+    print(
+        json.dumps(
+            {
+                "status": "ok",
+                "message": "current matching table reset",
+            }
+        )
+    )
+
+
+def participant_profile(args: argparse.Namespace) -> None:
+    repo = _repo_from_path(args.db_path)
+    profile = repo.get_participant_profile(args.name)
+    if profile is None:
+        raise SystemExit(f"participant not found: {args.name}")
+    print(json.dumps(profile, indent=2))
+
+
 def import_google_form(args: argparse.Namespace) -> None:
     repo = _repo_from_path(args.db_path)
     csv_url = args.csv_url if args.csv_url else build_public_csv_url(args.sheet_url)
@@ -349,6 +380,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Enable ANSI colors for member names in table output (default: true).",
     )
     match_cmd.set_defaults(func=run_matching)
+
+    reset_cmd = subparsers.add_parser("reset-matching-table")
+    reset_cmd.add_argument("--controller-key", required=True)
+    reset_cmd.set_defaults(func=reset_matching_table)
+
+    profile_cmd = subparsers.add_parser("participant-profile")
+    profile_cmd.add_argument("--name", required=True)
+    profile_cmd.set_defaults(func=participant_profile)
 
     import_cmd = subparsers.add_parser("import-google-form")
     import_source_group = import_cmd.add_mutually_exclusive_group(required=True)

@@ -55,6 +55,10 @@ python3 -m ngo_matching add-participant \
   --culture "East Asian"
 ```
 
+`add-participant` is case-insensitive on name. If the same name is entered again
+with different case (for example `Alice` vs `alice`), the new submission
+overwrites the prior participant profile.
+
 ### 3. Update matching policy (controller only)
 
 ```bash
@@ -77,6 +81,19 @@ Optional flags for this command:
 
 ```bash
 python3 -m ngo_matching run-match --dry-run
+```
+
+Reset only the current matching table (history remains in participant profiles):
+
+```bash
+python3 -m ngo_matching reset-matching-table \
+  --controller-key "super-secret-key"
+```
+
+View one participant profile and full match history (case-insensitive by name):
+
+```bash
+python3 -m ngo_matching participant-profile --name "alice"
 ```
 
 ### 5. Import participants from Google Form responses

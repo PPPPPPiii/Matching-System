@@ -340,3 +340,96 @@ def test_dry_run_does_not_persist_round_history() -> None:
         _ = engine.run_round(persist=True)
         counts_after_real = store.get_pair_match_counts()
         assert len(counts_after_real) == 1
+
+
+def test_add_participant_overwrites_by_name_case_insensitive() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = str(Path(temp_dir) / "matching.sqlite")
+        store = DataStore(db_path=db_path)
+
+        first = Participant.from_signup(
+            name="Alice",
+            age=22,
+            is_emory_student=True,
+            gender="female",
+            attendance_experience=False,
+            ethnicity="Korean",
+            culture="East Asian",
+        )
+        second = Participant.from_signup(
+            name="aLiCe",
+            age=25,
+            is_emory_student=False,
+            gender="female",
+            attendance_experience=True,
+            ethnicity="Korean",
+            culture="East Asian",
+        )
+
+        r1 = store.add_participant(first)
+        r2 = store.add_participant(second)
+
+        assert r1["action"] == "created"
+        assert r2["action"] == "updated"
+        participants = store.list_participants()
+        assert len(participants) == 1
+        assert participants[0].age == 25
+        assert participants[0].is_emory_student is False
+        assert participants[0].attendance_experience is True
+
+
+def test_participant_profile_records_each_match() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = str(Path(temp_dir) / "matching.sqlite")
+        store = DataStore(db_path=db_path)
+        engine = MatchingEngine(store)
+
+        for p in (
+            _participant("A", 20, "male", False, "Asian", "Korean"),
+            _participant("B", 21, "female", True, "Latino", "Mexican"),
+            _participant("C", 22, "male", False, "Black", "Nigerian"),
+            _participant("D", 23, "female", True, "White", "American"),
+        ):
+            store.add_participant(p)
+
+        _ = engine.run_round()
+        _ = engine.run_round()
+
+        profile = store.get_participant_profile("a")
+        assert profile is not None
+        history = profile["match_history"]
+        assert len(history) >= 2
+        # The same partner should not repeat early when alternatives exist.
+        matched_names = {row["matched_with_name"] for row in history}
+        assert len(matched_names) >= 2
+
+
+def test_reset_matching_table_clears_current_not_history() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = str(Path(temp_dir) / "matching.sqlite")
+        secret = "secret-key"
+        store = DataStore(db_path=db_path, controller_secret=secret)
+        engine = MatchingEngine(store)
+
+        store.add_participant(_participant("A", 20, "male", False, "Asian", "Korean"))
+        store.add_participant(_participant("B", 21, "female", True, "Latino", "Mexican"))
+        _ = engine.run_round()
+
+        with store._connect() as conn:  # noqa: SLF001 - test-only inspection
+            before_count = conn.execute(
+                "SELECT COUNT(*) AS c FROM current_matching_table"
+            ).fetchone()["c"]
+        assert int(before_count) > 0
+
+        ok = store.reset_matching_table(secret)
+        assert ok is True
+
+        with store._connect() as conn:  # noqa: SLF001 - test-only inspection
+            after_count = conn.execute(
+                "SELECT COUNT(*) AS c FROM current_matching_table"
+            ).fetchone()["c"]
+        assert int(after_count) == 0
+
+        # Pair history remains for future rematch prevention.
+        counts = store.get_pair_match_counts()
+        assert len(counts) == 1
