@@ -71,6 +71,10 @@ python3 -m ngo_matching set-policy \
 python3 -m ngo_matching run-match
 ```
 
+Optional flags for this command:
+- `--show-score-details`: print score formula and score component breakdown.
+- `--dry-run`: preview matching without saving the round to history.
+
 ### 5. Import participants from Google Form responses
 
 1. In Google Forms, link responses to a Google Sheet.
