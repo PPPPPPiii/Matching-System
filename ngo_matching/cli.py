@@ -7,14 +7,11 @@ import sys
 from pathlib import Path
 from typing import Any, Dict
 
-from ngo_matching.google_forms import (
-    build_public_csv_url,
-    fetch_csv_rows,
-    parse_google_form_rows,
-)
+from ngo_matching.google_forms import GoogleFormImportError, parse_uploaded_sheet
 from ngo_matching.matcher import MatchingEngine
 from ngo_matching.models import MatchingPolicy, Participant, parse_bool
 from ngo_matching.storage import DataStore
+from ngo_matching.web import run_web_app
 
 
 DEFAULT_DB = Path("data/ngo_matching.db")
@@ -114,8 +111,16 @@ def register_participant(args: argparse.Namespace) -> None:
         ethnicity=args.ethnicity,
         culture=args.culture,
     )
-    repo.add_participant(participant)
-    print(json.dumps({"participant_id": participant.participant_id, "name": participant.name}))
+    result = repo.add_participant(participant)
+    print(
+        json.dumps(
+            {
+                "participant_id": result["participant_id"],
+                "name": result["name"],
+                "action": result["action"],
+            }
+        )
+    )
 
 
 def list_participants(args: argparse.Namespace) -> None:
@@ -188,6 +193,32 @@ def update_policy(args: argparse.Namespace) -> None:
 
 def run_matching(args: argparse.Namespace) -> None:
     repo = _repo_from_path(args.db_path)
+    if args.print_users_table:
+        participants = repo.list_participants()
+        user_rows = [
+            [
+                participant.name,
+                participant.ethnicity,
+                participant.culture,
+                participant.gender,
+                "true" if participant.is_emory_student else "false",
+                "true" if not participant.attendance_experience else "false",
+            ]
+            for participant in participants
+        ]
+        print("Participants before matching:")
+        _print_table(
+            [
+                "Name",
+                "Country of Citizen",
+                "Nationality/Culture",
+                "Gender",
+                "Emory Student",
+                "First Time",
+            ],
+            user_rows,
+        )
+
     engine = MatchingEngine(repo)
     result = engine.run_round(persist=not args.dry_run)
     rows = []
@@ -254,18 +285,54 @@ def run_matching(args: argparse.Namespace) -> None:
         print("Unmatched:", ", ".join(p.name for p in result.unmatched))
 
 
-def import_google_form(args: argparse.Namespace) -> None:
+def reset_matching_table(args: argparse.Namespace) -> None:
     repo = _repo_from_path(args.db_path)
-    csv_url = args.csv_url if args.csv_url else build_public_csv_url(args.sheet_url)
-    rows = fetch_csv_rows(csv_url)
-    parsed = parse_google_form_rows(csv_url, rows)
+    ok = repo.reset_matching_table(args.controller_key)
+    if not ok:
+        raise SystemExit("controller key invalid or controller not configured")
+    print(
+        json.dumps(
+            {
+                "status": "ok",
+                "message": "current matching table reset",
+            }
+        )
+    )
+
+
+def participant_profile(args: argparse.Namespace) -> None:
+    repo = _repo_from_path(args.db_path)
+    profile = repo.get_participant_profile(args.name)
+    if profile is None:
+        raise SystemExit(f"participant not found: {args.name}")
+    print(json.dumps(profile, indent=2))
+
+
+def cleanup_participants(args: argparse.Namespace) -> None:
+    repo = _repo_from_path(args.db_path)
+    result = repo.cleanup_duplicate_participants(args.controller_key)
+    if not result.get("ok"):
+        raise SystemExit(result.get("message", "cleanup failed"))
+    print(json.dumps(result, indent=2))
+
+
+def run_web(args: argparse.Namespace) -> None:
+    run_web_app(db_path=args.db_path, host=args.host, port=args.port)
+
+
+def import_sheet(args: argparse.Namespace) -> None:
+    repo = _repo_from_path(args.db_path)
+    try:
+        parsed = parse_uploaded_sheet(args.file_path)
+    except GoogleFormImportError as exc:
+        raise SystemExit(str(exc)) from exc
 
     imported = 0
     skipped = 0
     for record_key, participant in parsed:
         was_new = repo.add_participant_from_source(
             participant,
-            source=csv_url,
+            source=args.file_path,
             record_key=record_key,
         )
         if was_new:
@@ -276,8 +343,8 @@ def import_google_form(args: argparse.Namespace) -> None:
     print(
         json.dumps(
             {
-                "source": csv_url,
-                "rows_read": len(rows),
+                "source": args.file_path,
+                "rows_read": len(parsed),
                 "imported": imported,
                 "skipped_existing": skipped,
             },
@@ -348,19 +415,45 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
         help="Enable ANSI colors for member names in table output (default: true).",
     )
+    match_cmd.add_argument(
+        "--print-users-table",
+        action="store_true",
+        help="Print all participant data in a table before matching.",
+    )
     match_cmd.set_defaults(func=run_matching)
 
+    reset_cmd = subparsers.add_parser("reset-matching-table")
+    reset_cmd.add_argument("--controller-key", required=True)
+    reset_cmd.set_defaults(func=reset_matching_table)
+
+    profile_cmd = subparsers.add_parser("participant-profile")
+    profile_cmd.add_argument("--name", required=True)
+    profile_cmd.set_defaults(func=participant_profile)
+
+    cleanup_cmd = subparsers.add_parser("cleanup-participants")
+    cleanup_cmd.add_argument("--controller-key", required=True)
+    cleanup_cmd.set_defaults(func=cleanup_participants)
+
+    web_cmd = subparsers.add_parser("run-web")
+    web_cmd.add_argument("--host", default="127.0.0.1")
+    web_cmd.add_argument("--port", type=int, default=8080)
+    web_cmd.set_defaults(func=run_web)
+
     import_cmd = subparsers.add_parser("import-google-form")
-    import_source_group = import_cmd.add_mutually_exclusive_group(required=True)
-    import_source_group.add_argument(
-        "--sheet-url",
-        help="Public Google Sheets URL containing form responses.",
+    import_cmd.add_argument(
+        "--file-path",
+        required=True,
+        help="Local path to participant sheet (.csv or .xlsx).",
     )
-    import_source_group.add_argument(
-        "--csv-url",
-        help="Direct CSV export URL.",
+    import_cmd.set_defaults(func=import_sheet)
+
+    import_sheet_cmd = subparsers.add_parser("import-sheet")
+    import_sheet_cmd.add_argument(
+        "--file-path",
+        required=True,
+        help="Local path to participant sheet (.csv or .xlsx).",
     )
-    import_cmd.set_defaults(func=import_google_form)
+    import_sheet_cmd.set_defaults(func=import_sheet)
     return parser
 
 

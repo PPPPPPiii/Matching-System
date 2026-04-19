@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from itertools import combinations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -349,5 +350,21 @@ class MatchingEngine:
             for i, j in combinations(range(len(group.participants)), 2)
         ]
         if persist:
-            self.store.record_round(round_payload)
+            round_id = self.store.record_round(round_payload)
+            current_table_rows = [
+                (
+                    group_index,
+                    participant.participant_id,
+                    member_order,
+                    len(group.participants),
+                    group.score,
+                    json.dumps(group.reasons),
+                )
+                for group_index, group in enumerate(result.groups, start=1)
+                for member_order, participant in enumerate(group.participants, start=1)
+            ]
+            self.store.replace_current_matching_table(
+                round_id=round_id,
+                rows=current_table_rows,
+            )
         return result

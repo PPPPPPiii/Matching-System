@@ -3,10 +3,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from ngo_matching.google_forms import (
-    build_public_csv_url,
-    parse_google_form_rows,
-)
+from ngo_matching.google_forms import GoogleFormImportError, parse_uploaded_sheet
 from ngo_matching.matcher import MatchingEngine
 from ngo_matching.models import MatchingPolicy, Participant
 from ngo_matching.storage import DataStore
@@ -156,67 +153,87 @@ def test_single_controller_only_first_registration_wins() -> None:
         assert second is False
 
 
-def test_google_forms_csv_url_builder() -> None:
-    sheet_url = (
-        "https://docs.google.com/spreadsheets/d/"
-        "abcDEF1234567890/edit?gid=987654321#gid=987654321"
-    )
-    csv_url = build_public_csv_url(sheet_url)
-    assert (
-        csv_url
-        == "https://docs.google.com/spreadsheets/d/abcDEF1234567890/export?format=csv&gid=987654321"
-    )
-
-
-def test_google_form_import_is_idempotent_by_record_key() -> None:
+def test_sheet_import_is_idempotent_by_record_key() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = str(Path(temp_dir) / "matching.sqlite")
         store = DataStore(db_path=db_path)
-        source = "https://docs.google.com/spreadsheets/d/abc/export?format=csv&gid=0"
-        rows = [
-            {
-                "timestamp": "2026/04/07 10:00:00",
-                "email address": "alex@example.com",
-                "name": "Alex",
-                "age": "22",
-                "is emory student": "true",
-                "gender": "male",
-                "attendance experience": "false",
-                "ethnicity": "Asian",
-                "culture": "Korean",
-            },
-            {
-                "timestamp": "2026/04/07 10:01:00",
-                "email address": "jordan@example.com",
-                "name": "Jordan",
-                "age": "23",
-                "is emory student": "false",
-                "gender": "female",
-                "attendance experience": "true",
-                "ethnicity": "Latino",
-                "culture": "Mexican",
-            },
-        ]
+        csv_path = Path(temp_dir) / "participants.csv"
+        csv_path.write_text(
+            "\n".join(
+                [
+                    "Name,Countries of Citizen,Nationalities/Culture Identified As,Gender,Emory Student or Not,First Time or Not",
+                    "Alex Kim,United States,Korean,male,true,true",
+                    "Jordan Diaz,Mexico,Mexican,female,false,false",
+                ]
+            ),
+            encoding="utf-8",
+        )
 
-        parsed_once = parse_google_form_rows(source, rows)
+        parsed_once = parse_uploaded_sheet(str(csv_path))
         imported_once = 0
         for record_key, participant in parsed_once:
             if store.add_participant_from_source(
-                participant, source=source, record_key=record_key
+                participant, source=str(csv_path), record_key=record_key
             ):
                 imported_once += 1
         assert imported_once == 2
 
-        parsed_twice = parse_google_form_rows(source, rows)
+        parsed_twice = parse_uploaded_sheet(str(csv_path))
         imported_twice = 0
         for record_key, participant in parsed_twice:
             if store.add_participant_from_source(
-                participant, source=source, record_key=record_key
+                participant, source=str(csv_path), record_key=record_key
             ):
                 imported_twice += 1
 
         assert imported_twice == 0
         assert len(store.list_participants()) == 2
+
+
+def test_sheet_import_header_keyword_detection_and_country_normalization() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        csv_path = Path(temp_dir) / "participants.csv"
+        csv_path.write_text(
+            "\n".join(
+                [
+                    "First Name,Last Name,Country of Citizenship,Nationality/Culture identified as,Gender,Are you Emory student?,First time attendee?,Age",
+                    "Alice,Smith,America,East Asian,Female,Yes,Yes,22",
+                    "Bob,Jones,United States,east asian,male,true,false,23",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        parsed = parse_uploaded_sheet(str(csv_path))
+        assert len(parsed) == 2
+        p1 = parsed[0][1]
+        p2 = parsed[1][1]
+        assert p1.name == "Alice Smith"
+        assert p1.ethnicity == "united states"
+        assert p2.ethnicity == "united states"
+        assert p1.culture == "east asian"
+        assert p2.culture == "east asian"
+        assert p1.attendance_experience is False
+        assert p2.attendance_experience is True
+
+
+def test_sheet_import_requires_characteristic_columns() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        csv_path = Path(temp_dir) / "bad.csv"
+        csv_path.write_text(
+            "\n".join(
+                [
+                    "Name,Gender,Age",
+                    "Alice Smith,female,22",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        try:
+            _ = parse_uploaded_sheet(str(csv_path))
+            assert False, "Expected GoogleFormImportError"
+        except GoogleFormImportError as exc:
+            assert "Unable to detect required columns" in str(exc)
 
 
 def test_odd_participants_produce_triad() -> None:
@@ -340,3 +357,288 @@ def test_dry_run_does_not_persist_round_history() -> None:
         _ = engine.run_round(persist=True)
         counts_after_real = store.get_pair_match_counts()
         assert len(counts_after_real) == 1
+
+
+def test_add_participant_overwrites_by_name_case_insensitive() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = str(Path(temp_dir) / "matching.sqlite")
+        store = DataStore(db_path=db_path)
+
+        first = Participant.from_signup(
+            name="Alice",
+            age=22,
+            is_emory_student=True,
+            gender="female",
+            attendance_experience=False,
+            ethnicity="Korean",
+            culture="East Asian",
+        )
+        second = Participant.from_signup(
+            name="aLiCe",
+            age=25,
+            is_emory_student=False,
+            gender="female",
+            attendance_experience=True,
+            ethnicity="Korean",
+            culture="East Asian",
+        )
+
+        r1 = store.add_participant(first)
+        r2 = store.add_participant(second)
+
+        assert r1["action"] == "created"
+        assert r2["action"] == "updated"
+        participants = store.list_participants()
+        assert len(participants) == 1
+        assert participants[0].age == 25
+        assert participants[0].is_emory_student is False
+        assert participants[0].attendance_experience is True
+
+
+def test_participant_profile_records_each_match() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = str(Path(temp_dir) / "matching.sqlite")
+        store = DataStore(db_path=db_path)
+        engine = MatchingEngine(store)
+
+        for p in (
+            _participant("A", 20, "male", False, "Asian", "Korean"),
+            _participant("B", 21, "female", True, "Latino", "Mexican"),
+            _participant("C", 22, "male", False, "Black", "Nigerian"),
+            _participant("D", 23, "female", True, "White", "American"),
+        ):
+            store.add_participant(p)
+
+        _ = engine.run_round()
+        _ = engine.run_round()
+
+        profile = store.get_participant_profile("a")
+        assert profile is not None
+        history = profile["match_history"]
+        assert len(history) >= 2
+        # The same partner should not repeat early when alternatives exist.
+        matched_names = {row["matched_with_name"] for row in history}
+        assert len(matched_names) >= 2
+
+
+def test_reset_matching_table_clears_current_not_history() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = str(Path(temp_dir) / "matching.sqlite")
+        secret = "secret-key"
+        store = DataStore(db_path=db_path, controller_secret=secret)
+        engine = MatchingEngine(store)
+
+        store.add_participant(_participant("A", 20, "male", False, "Asian", "Korean"))
+        store.add_participant(_participant("B", 21, "female", True, "Latino", "Mexican"))
+        _ = engine.run_round()
+
+        with store._connect() as conn:  # noqa: SLF001 - test-only inspection
+            before_count = conn.execute(
+                "SELECT COUNT(*) AS c FROM current_matching_table"
+            ).fetchone()["c"]
+        assert int(before_count) > 0
+
+        ok = store.reset_matching_table(secret)
+        assert ok is True
+
+        with store._connect() as conn:  # noqa: SLF001 - test-only inspection
+            after_count = conn.execute(
+                "SELECT COUNT(*) AS c FROM current_matching_table"
+            ).fetchone()["c"]
+        assert int(after_count) == 0
+
+        # Pair history remains for future rematch prevention.
+        counts = store.get_pair_match_counts()
+        assert len(counts) == 1
+
+
+def test_first_last_name_identity_ignores_case_and_spacing() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = str(Path(temp_dir) / "matching.sqlite")
+        store = DataStore(db_path=db_path)
+
+        store.add_participant(
+            Participant.from_signup(
+                name="Alice   Smith",
+                age=20,
+                is_emory_student=True,
+                gender="female",
+                attendance_experience=False,
+                ethnicity="Korean",
+                culture="East Asian",
+            )
+        )
+        update_result = store.add_participant(
+            Participant.from_signup(
+                name="  ALICE smith ",
+                age=25,
+                is_emory_student=False,
+                gender="female",
+                attendance_experience=True,
+                ethnicity="Korean",
+                culture="East Asian",
+            )
+        )
+
+        participants = store.list_participants()
+        assert len(participants) == 1
+        assert update_result["action"] == "updated"
+        assert participants[0].name == "ALICE smith"
+        assert participants[0].age == 25
+        assert participants[0].attendance_experience is True
+
+
+def test_cleanup_participants_deduplicates_by_first_last_name() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = str(Path(temp_dir) / "matching.sqlite")
+        secret = "cleanup-secret"
+        store = DataStore(db_path=db_path, controller_secret=secret)
+
+        p_old = Participant.from_signup(
+            name="Alice Smith",
+            age=20,
+            is_emory_student=True,
+            gender="female",
+            attendance_experience=False,
+            ethnicity="Korean",
+            culture="East Asian",
+        )
+        p_new = Participant.from_signup(
+            name="ALICE   smith",
+            age=22,
+            is_emory_student=False,
+            gender="female",
+            attendance_experience=True,
+            ethnicity="Korean",
+            culture="East Asian",
+        )
+        p_other = Participant.from_signup(
+            name="Bob Jones",
+            age=23,
+            is_emory_student=True,
+            gender="male",
+            attendance_experience=False,
+            ethnicity="Chinese",
+            culture="East Asian",
+        )
+
+        with store._connect() as conn:  # noqa: SLF001 - test fixture setup
+            conn.execute(
+                """
+                INSERT INTO participants (
+                    participant_id, name, name_key, age, is_emory_student, gender,
+                    attendance_experience, ethnicity, culture, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    p_old.participant_id,
+                    p_old.name,
+                    "alicesmith",
+                    p_old.age,
+                    int(p_old.is_emory_student),
+                    p_old.gender,
+                    int(p_old.attendance_experience),
+                    p_old.ethnicity,
+                    p_old.culture,
+                    p_old.created_at,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO participants (
+                    participant_id, name, name_key, age, is_emory_student, gender,
+                    attendance_experience, ethnicity, culture, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    p_new.participant_id,
+                    p_new.name,
+                    "alicesmith",
+                    p_new.age,
+                    int(p_new.is_emory_student),
+                    p_new.gender,
+                    int(p_new.attendance_experience),
+                    p_new.ethnicity,
+                    p_new.culture,
+                    p_new.created_at,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO participants (
+                    participant_id, name, name_key, age, is_emory_student, gender,
+                    attendance_experience, ethnicity, culture, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    p_other.participant_id,
+                    p_other.name,
+                    "bobjones",
+                    p_other.age,
+                    int(p_other.is_emory_student),
+                    p_other.gender,
+                    int(p_other.attendance_experience),
+                    p_other.ethnicity,
+                    p_other.culture,
+                    p_other.created_at,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO ingestion_records (source, record_key, participant_id, imported_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                ("source", "row1", p_old.participant_id, p_old.created_at),
+            )
+
+        summary = store.cleanup_duplicate_participants(secret)
+        assert summary["ok"] is True
+        assert summary["deleted_duplicate_participants"] == 1
+
+        participants = store.list_participants()
+        names = sorted(p.name for p in participants)
+        assert names == ["ALICE smith", "Bob Jones"]
+
+        with store._connect() as conn:  # noqa: SLF001 - test-only inspection
+            row = conn.execute(
+                "SELECT participant_id FROM ingestion_records WHERE source = ? AND record_key = ?",
+                ("source", "row1"),
+            ).fetchone()
+        assert row is not None
+        assert row["participant_id"] == p_new.participant_id
+
+
+def test_find_current_group_for_name_and_controller_view() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = str(Path(temp_dir) / "matching.sqlite")
+        secret = "controller-secret"
+        store = DataStore(db_path=db_path, controller_secret=secret)
+        engine = MatchingEngine(store)
+
+        store.add_participant(
+            _participant("Alice Smith", 22, "female", False, "Korean", "East Asian")
+        )
+        store.add_participant(
+            _participant("Bob Jones", 23, "male", True, "Chinese", "East Asian")
+        )
+        _ = engine.run_round()
+
+        group = store.get_current_table_assignment("  alice   smith ")
+        assert group is not None
+        assert group["table_number"] == 1
+        assert "Alice Smith" in {m["name"] for m in group["members"]}
+        assert "Bob Jones" in {m["name"] for m in group["members"]}
+
+        assert store.verify_controller_key(secret) is True
+        controller_table = store.list_current_matching_groups()
+        assert len(controller_table) == 1
+        assert controller_table[0]["table_number"] == 1
+        assert {m["name"] for m in controller_table[0]["members"]} == {
+            "Alice Smith",
+            "Bob Jones",
+        }
+
+        assert store.verify_controller_key("wrong") is False

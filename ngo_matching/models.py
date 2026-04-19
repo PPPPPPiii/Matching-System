@@ -2,12 +2,36 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
+import re
 from typing import Any, Dict, Optional
 from uuid import uuid4
 
 
 def _normalize_text(value: str) -> str:
     return " ".join(value.strip().split())
+
+
+def _normalize_identity_phrase(value: str) -> str:
+    tokens = re.findall(r"[a-z0-9]+", value.lower())
+    normalized_tokens: list[str] = []
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token == "united" and i + 1 < len(tokens) and tokens[i + 1] in {
+            "states",
+            "state",
+        }:
+            normalized_tokens.extend(["united", "states"])
+            i += 2
+            continue
+        if token in {"usa", "us", "america", "american"}:
+            normalized_tokens.extend(["united", "states"])
+            i += 1
+            continue
+        normalized_tokens.append(token)
+        i += 1
+
+    return " ".join(normalized_tokens)
 
 
 def parse_bool(value: Any) -> bool:
@@ -63,8 +87,8 @@ class Participant:
             is_emory_student=parse_bool(is_emory_student),
             gender=_normalize_text(gender),
             attendance_experience=parse_bool(attendance_experience),
-            ethnicity=_normalize_text(ethnicity),
-            culture=_normalize_text(culture),
+            ethnicity=_normalize_identity_phrase(ethnicity),
+            culture=_normalize_identity_phrase(culture),
             created_at=created_at,
         )
 
