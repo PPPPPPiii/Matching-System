@@ -3,10 +3,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from ngo_matching.google_forms import (
-    build_public_csv_url,
-    parse_google_form_rows,
-)
+from ngo_matching.google_forms import GoogleFormImportError, parse_uploaded_sheet
 from ngo_matching.matcher import MatchingEngine
 from ngo_matching.models import MatchingPolicy, Participant
 from ngo_matching.storage import DataStore
@@ -156,67 +153,87 @@ def test_single_controller_only_first_registration_wins() -> None:
         assert second is False
 
 
-def test_google_forms_csv_url_builder() -> None:
-    sheet_url = (
-        "https://docs.google.com/spreadsheets/d/"
-        "abcDEF1234567890/edit?gid=987654321#gid=987654321"
-    )
-    csv_url = build_public_csv_url(sheet_url)
-    assert (
-        csv_url
-        == "https://docs.google.com/spreadsheets/d/abcDEF1234567890/export?format=csv&gid=987654321"
-    )
-
-
-def test_google_form_import_is_idempotent_by_record_key() -> None:
+def test_sheet_import_is_idempotent_by_record_key() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = str(Path(temp_dir) / "matching.sqlite")
         store = DataStore(db_path=db_path)
-        source = "https://docs.google.com/spreadsheets/d/abc/export?format=csv&gid=0"
-        rows = [
-            {
-                "timestamp": "2026/04/07 10:00:00",
-                "email address": "alex@example.com",
-                "name": "Alex",
-                "age": "22",
-                "is emory student": "true",
-                "gender": "male",
-                "attendance experience": "false",
-                "ethnicity": "Asian",
-                "culture": "Korean",
-            },
-            {
-                "timestamp": "2026/04/07 10:01:00",
-                "email address": "jordan@example.com",
-                "name": "Jordan",
-                "age": "23",
-                "is emory student": "false",
-                "gender": "female",
-                "attendance experience": "true",
-                "ethnicity": "Latino",
-                "culture": "Mexican",
-            },
-        ]
+        csv_path = Path(temp_dir) / "participants.csv"
+        csv_path.write_text(
+            "\n".join(
+                [
+                    "Name,Countries of Citizen,Nationalities/Culture Identified As,Gender,Emory Student or Not,First Time or Not",
+                    "Alex Kim,United States,Korean,male,true,true",
+                    "Jordan Diaz,Mexico,Mexican,female,false,false",
+                ]
+            ),
+            encoding="utf-8",
+        )
 
-        parsed_once = parse_google_form_rows(source, rows)
+        parsed_once = parse_uploaded_sheet(str(csv_path))
         imported_once = 0
         for record_key, participant in parsed_once:
             if store.add_participant_from_source(
-                participant, source=source, record_key=record_key
+                participant, source=str(csv_path), record_key=record_key
             ):
                 imported_once += 1
         assert imported_once == 2
 
-        parsed_twice = parse_google_form_rows(source, rows)
+        parsed_twice = parse_uploaded_sheet(str(csv_path))
         imported_twice = 0
         for record_key, participant in parsed_twice:
             if store.add_participant_from_source(
-                participant, source=source, record_key=record_key
+                participant, source=str(csv_path), record_key=record_key
             ):
                 imported_twice += 1
 
         assert imported_twice == 0
         assert len(store.list_participants()) == 2
+
+
+def test_sheet_import_header_keyword_detection_and_country_normalization() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        csv_path = Path(temp_dir) / "participants.csv"
+        csv_path.write_text(
+            "\n".join(
+                [
+                    "First Name,Last Name,Country of Citizenship,Nationality/Culture identified as,Gender,Are you Emory student?,First time attendee?,Age",
+                    "Alice,Smith,America,East Asian,Female,Yes,Yes,22",
+                    "Bob,Jones,United States,east asian,male,true,false,23",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        parsed = parse_uploaded_sheet(str(csv_path))
+        assert len(parsed) == 2
+        p1 = parsed[0][1]
+        p2 = parsed[1][1]
+        assert p1.name == "Alice Smith"
+        assert p1.ethnicity == "united states"
+        assert p2.ethnicity == "united states"
+        assert p1.culture == "east asian"
+        assert p2.culture == "east asian"
+        assert p1.attendance_experience is False
+        assert p2.attendance_experience is True
+
+
+def test_sheet_import_requires_characteristic_columns() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        csv_path = Path(temp_dir) / "bad.csv"
+        csv_path.write_text(
+            "\n".join(
+                [
+                    "Name,Gender,Age",
+                    "Alice Smith,female,22",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        try:
+            _ = parse_uploaded_sheet(str(csv_path))
+            assert False, "Expected GoogleFormImportError"
+        except GoogleFormImportError as exc:
+            assert "Unable to detect required columns" in str(exc)
 
 
 def test_odd_participants_produce_triad() -> None:

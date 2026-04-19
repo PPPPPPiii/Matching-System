@@ -82,6 +82,7 @@ python3 -m ngo_matching run-match
 Optional flags for this command:
 - `--show-score-details`: print score formula and score component breakdown.
 - `--dry-run`: preview matching without saving the round to history.
+- `--print-users-table`: print all users' characteristic data in a table before matching.
 
 ```bash
 python3 -m ngo_matching run-match --dry-run
@@ -107,32 +108,33 @@ python3 -m ngo_matching cleanup-participants \
   --controller-key "super-secret-key"
 ```
 
-### 5. Import participants from Google Form responses
+### 5. Import participants from uploaded CSV/XLSX sheet
 
-1. In Google Forms, link responses to a Google Sheet.
-2. In Google Sheets, share the response sheet for viewing (so CSV export is readable).
-3. Run import from either sheet URL or direct CSV URL:
+Use a local spreadsheet file instead of URL import:
 
 ```bash
-# Option A: pass the sheet URL
-python3 -m ngo_matching import-google-form \
-  --sheet-url "https://docs.google.com/spreadsheets/d/<SHEET_ID>/edit?gid=0"
-
-# Option B: pass direct CSV export URL
-python3 -m ngo_matching import-google-form \
-  --csv-url "https://docs.google.com/spreadsheets/d/<SHEET_ID>/export?format=csv&gid=0"
+python3 -m ngo_matching import-sheet --file-path "./participants.xlsx"
 ```
 
-Expected Google Form column names (case-insensitive):
-- Name (or Full Name)
-- Age
-- Is Emory Student
-- Gender
-- Attendance Experience
-- Ethnicity
-- Culture
+(`import-google-form --file-path ...` is also supported as a backward-compatible alias.)
 
-Import is idempotent: previously imported response rows are skipped on re-run.
+Supported file types:
+- `.csv`
+- `.xlsx`
+
+The importer scans the **first row** and detects columns by keywords for these required characteristics:
+- name (full name OR first name + last name)
+- countries of citizen
+- nationalities/culture identified as
+- gender
+- Emory student or not
+- first time or not
+
+Notes:
+- Header detection is case-insensitive and word-based.
+- `nationalities/culture` values are normalized case-insensitively by phrase tokens.
+- `America`, `US`, `USA`, and `United States` are treated as the same value.
+- Import is idempotent: previously imported rows are skipped on re-run.
 
 ### 6. Run the HTML website
 
