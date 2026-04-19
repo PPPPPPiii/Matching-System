@@ -241,6 +241,28 @@ def test_sheet_import_detects_question_style_gender_header() -> None:
         assert p2.ethnicity == "united states"
 
 
+def test_sheet_import_detects_student_or_scholar_header_for_emory_status() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        csv_path = Path(temp_dir) / "participants_student_or_scholar.csv"
+        csv_path.write_text(
+            "\n".join(
+                [
+                    "Full Name,Countries of Citizen,Nationalities/Culture identified as,Gender,Are you a student or scholar?,First Time or Not,Age",
+                    "Alice Smith,America,East Asian,Female,Yes,Yes,22",
+                    "Bob Jones,United States,east asian,male,No,False,23",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        parsed = parse_uploaded_sheet(str(csv_path))
+        assert len(parsed) == 2
+        p1 = parsed[0][1]
+        p2 = parsed[1][1]
+        assert p1.is_emory_student is True
+        assert p2.is_emory_student is False
+
+
 def test_sheet_import_requires_characteristic_columns() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         csv_path = Path(temp_dir) / "bad.csv"
