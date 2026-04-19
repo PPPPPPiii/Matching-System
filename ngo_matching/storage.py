@@ -27,8 +27,22 @@ def _hash_secret(secret: str) -> str:
     return hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
 
+def _clean_name_token(token: str) -> str:
+    return "".join(ch for ch in token.lower() if ch.isalnum())
+
+
 def _name_key(name: str) -> str:
-    return " ".join(name.strip().lower().split())
+    normalized = " ".join(name.strip().split())
+    if not normalized:
+        return ""
+    tokens = [_clean_name_token(token) for token in normalized.split()]
+    tokens = [token for token in tokens if token]
+    if not tokens:
+        return ""
+    if len(tokens) >= 2:
+        # Match by first + last name, regardless of capitalization and spacing.
+        return f"{tokens[0]}{tokens[-1]}"
+    return tokens[0]
 
 
 class DataStore:
@@ -63,6 +77,7 @@ class DataStore:
                 CREATE TABLE IF NOT EXISTS participants (
                     participant_id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
+                    name_key TEXT NOT NULL,
                     age INTEGER NOT NULL,
                     is_emory_student INTEGER NOT NULL,
                     gender TEXT NOT NULL,
@@ -145,8 +160,65 @@ class DataStore:
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (group_index, participant_id)
                 );
+
+                CREATE INDEX IF NOT EXISTS idx_participants_name_key
+                    ON participants(name_key);
                 """
             )
+            self._ensure_participant_name_keys(conn)
+
+    def _ensure_participant_name_keys(self, conn: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(participants)").fetchall()
+        }
+        if "name_key" not in columns:
+            conn.execute("ALTER TABLE participants ADD COLUMN name_key TEXT")
+
+        rows = conn.execute(
+            """
+            SELECT participant_id, name
+            FROM participants
+            WHERE name_key IS NULL OR name_key = ''
+            """
+        ).fetchall()
+        for row in rows:
+            conn.execute(
+                """
+                UPDATE participants
+                SET name_key = ?
+                WHERE participant_id = ?
+                """,
+                (_name_key(row["name"]), row["participant_id"]),
+            )
+
+    def _canonical_participant_id_mapping(
+        self, conn: sqlite3.Connection
+    ) -> Dict[str, str]:
+        rows = conn.execute(
+            """
+            SELECT participant_id, name, name_key, created_at
+            FROM participants
+            ORDER BY created_at DESC
+            """
+        ).fetchall()
+        by_key: Dict[str, List[sqlite3.Row]] = {}
+        for row in rows:
+            key = row["name_key"] or _name_key(row["name"])
+            if not key:
+                continue
+            by_key.setdefault(key, []).append(row)
+
+        mapping: Dict[str, str] = {}
+        for grouped in by_key.values():
+            if len(grouped) <= 1:
+                continue
+            canonical_id = str(grouped[0]["participant_id"])  # newest row
+            for row in grouped[1:]:
+                old_id = str(row["participant_id"])
+                if old_id != canonical_id:
+                    mapping[old_id] = canonical_id
+        return mapping
 
     def _append_event(self, event_type: str, payload: Dict[str, Any]) -> None:
         created_at = _utc_now()
@@ -204,7 +276,7 @@ class DataStore:
             """
             SELECT participant_id, name
             FROM participants
-            WHERE lower(name) = ?
+            WHERE name_key = ?
             ORDER BY created_at ASC
             LIMIT 1
             """,
@@ -219,14 +291,15 @@ class DataStore:
             conn.execute(
                 """
                 INSERT INTO participants (
-                    participant_id, name, age, is_emory_student, gender,
+                    participant_id, name, name_key, age, is_emory_student, gender,
                     attendance_experience, ethnicity, culture, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     participant.participant_id,
                     participant.name,
+                    _name_key(participant.name),
                     participant.age,
                     int(participant.is_emory_student),
                     participant.gender,
@@ -246,12 +319,13 @@ class DataStore:
         conn.execute(
             """
             UPDATE participants
-            SET name = ?, age = ?, is_emory_student = ?, gender = ?,
+            SET name = ?, name_key = ?, age = ?, is_emory_student = ?, gender = ?,
                 attendance_experience = ?, ethnicity = ?, culture = ?, created_at = ?
             WHERE participant_id = ?
             """,
             (
                 participant.name,
+                _name_key(participant.name),
                 participant.age,
                 int(participant.is_emory_student),
                 participant.gender,
@@ -524,7 +598,7 @@ class DataStore:
                 SELECT participant_id, name, age, is_emory_student, gender,
                        attendance_experience, ethnicity, culture, created_at
                 FROM participants
-                WHERE lower(name) = ?
+                WHERE name_key = ?
                 ORDER BY created_at DESC
                 LIMIT 1
                 """,
@@ -569,6 +643,192 @@ class DataStore:
                 """
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def cleanup_duplicate_participants(self, controller_secret: str) -> Dict[str, Any]:
+        if not self._verify_controller(controller_secret):
+            return {
+                "ok": False,
+                "message": "controller key invalid or controller not configured",
+            }
+
+        with self._connect() as conn:
+            mapping = self._canonical_participant_id_mapping(conn)
+            if not mapping:
+                return {
+                    "ok": True,
+                    "updated_participant_refs": 0,
+                    "deleted_duplicate_participants": 0,
+                }
+
+            def remap(pid: str) -> str:
+                return mapping.get(pid, pid)
+
+            match_pairs_rows = conn.execute(
+                """
+                SELECT round_id, participant_a, participant_b, score, rationale
+                FROM match_pairs
+                """
+            ).fetchall()
+            rebuilt_pairs: Dict[Tuple[int, str, str], Dict[str, Any]] = {}
+            for row in match_pairs_rows:
+                a, b = _pair_tuple(remap(row["participant_a"]), remap(row["participant_b"]))
+                key = (int(row["round_id"]), a, b)
+                existing = rebuilt_pairs.get(key)
+                if existing is None or float(row["score"]) > float(existing["score"]):
+                    rebuilt_pairs[key] = {
+                        "round_id": int(row["round_id"]),
+                        "participant_a": a,
+                        "participant_b": b,
+                        "score": float(row["score"]),
+                        "rationale": row["rationale"],
+                    }
+
+            conn.execute("DELETE FROM match_pairs")
+            for row in rebuilt_pairs.values():
+                conn.execute(
+                    """
+                    INSERT INTO match_pairs (round_id, participant_a, participant_b, score, rationale)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        row["round_id"],
+                        row["participant_a"],
+                        row["participant_b"],
+                        row["score"],
+                        row["rationale"],
+                    ),
+                )
+
+            conn.execute("DELETE FROM pair_history")
+            pair_agg: Dict[Tuple[str, str], Dict[str, Any]] = {}
+            for row in rebuilt_pairs.values():
+                key = (row["participant_a"], row["participant_b"])
+                agg = pair_agg.get(key)
+                if agg is None:
+                    pair_agg[key] = {
+                        "first_round": row["round_id"],
+                        "last_round": row["round_id"],
+                        "times": 1,
+                    }
+                else:
+                    agg["first_round"] = min(agg["first_round"], row["round_id"])
+                    agg["last_round"] = max(agg["last_round"], row["round_id"])
+                    agg["times"] += 1
+            for (a, b), agg in pair_agg.items():
+                conn.execute(
+                    """
+                    INSERT INTO pair_history (
+                        pair_key, participant_a, participant_b,
+                        first_matched_round, last_matched_round, times_matched
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        _pair_key(a, b),
+                        a,
+                        b,
+                        int(agg["first_round"]),
+                        int(agg["last_round"]),
+                        int(agg["times"]),
+                    ),
+                )
+
+            round_time = {
+                int(row["round_id"]): row["run_at"]
+                for row in conn.execute(
+                    "SELECT round_id, run_at FROM match_rounds"
+                ).fetchall()
+            }
+            conn.execute("DELETE FROM participant_match_history")
+            for row in rebuilt_pairs.values():
+                matched_at = round_time.get(row["round_id"], _utc_now())
+                for person_id, matched_with_id in (
+                    (row["participant_a"], row["participant_b"]),
+                    (row["participant_b"], row["participant_a"]),
+                ):
+                    conn.execute(
+                        """
+                        INSERT INTO participant_match_history (
+                            person_id, matched_with_id, round_id, matched_at, score, rationale
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            person_id,
+                            matched_with_id,
+                            row["round_id"],
+                            matched_at,
+                            row["score"],
+                            row["rationale"],
+                        ),
+                    )
+
+            for old_id, new_id in mapping.items():
+                conn.execute(
+                    """
+                    UPDATE ingestion_records
+                    SET participant_id = ?
+                    WHERE participant_id = ?
+                    """,
+                    (new_id, old_id),
+                )
+
+            current_rows = conn.execute(
+                """
+                SELECT round_id, group_index, participant_id, member_order, group_size,
+                       score, reasons_json, updated_at
+                FROM current_matching_table
+                """
+            ).fetchall()
+            rebuilt_current: Dict[Tuple[int, str], sqlite3.Row] = {}
+            for row in current_rows:
+                remapped_id = remap(row["participant_id"])
+                key = (int(row["group_index"]), remapped_id)
+                if key not in rebuilt_current or int(row["member_order"]) < int(
+                    rebuilt_current[key]["member_order"]
+                ):
+                    rebuilt_current[key] = row
+            conn.execute("DELETE FROM current_matching_table")
+            for row in rebuilt_current.values():
+                conn.execute(
+                    """
+                    INSERT INTO current_matching_table (
+                        round_id, group_index, participant_id, member_order,
+                        group_size, score, reasons_json, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        int(row["round_id"]),
+                        int(row["group_index"]),
+                        remap(row["participant_id"]),
+                        int(row["member_order"]),
+                        int(row["group_size"]),
+                        float(row["score"]),
+                        row["reasons_json"],
+                        row["updated_at"],
+                    ),
+                )
+
+            deleted_count = 0
+            for old_id in mapping.keys():
+                deleted_count += conn.execute(
+                    "DELETE FROM participants WHERE participant_id = ?",
+                    (old_id,),
+                ).rowcount
+
+        self._append_event(
+            "duplicate_participants_cleaned",
+            {
+                "duplicate_count": len(mapping),
+                "deleted_participants": deleted_count,
+            },
+        )
+        return {
+            "ok": True,
+            "updated_participant_refs": len(mapping),
+            "deleted_duplicate_participants": deleted_count,
+        }
 
 
 # Backward-compatible aliases for callers that used earlier naming.

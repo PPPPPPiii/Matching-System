@@ -285,6 +285,14 @@ def participant_profile(args: argparse.Namespace) -> None:
     print(json.dumps(profile, indent=2))
 
 
+def cleanup_participants(args: argparse.Namespace) -> None:
+    repo = _repo_from_path(args.db_path)
+    result = repo.cleanup_duplicate_participants(args.controller_key)
+    if not result.get("ok"):
+        raise SystemExit(result.get("message", "cleanup failed"))
+    print(json.dumps(result, indent=2))
+
+
 def import_google_form(args: argparse.Namespace) -> None:
     repo = _repo_from_path(args.db_path)
     csv_url = args.csv_url if args.csv_url else build_public_csv_url(args.sheet_url)
@@ -388,6 +396,10 @@ def build_parser() -> argparse.ArgumentParser:
     profile_cmd = subparsers.add_parser("participant-profile")
     profile_cmd.add_argument("--name", required=True)
     profile_cmd.set_defaults(func=participant_profile)
+
+    cleanup_cmd = subparsers.add_parser("cleanup-participants")
+    cleanup_cmd.add_argument("--controller-key", required=True)
+    cleanup_cmd.set_defaults(func=cleanup_participants)
 
     import_cmd = subparsers.add_parser("import-google-form")
     import_source_group = import_cmd.add_mutually_exclusive_group(required=True)

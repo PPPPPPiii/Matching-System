@@ -433,3 +433,162 @@ def test_reset_matching_table_clears_current_not_history() -> None:
         # Pair history remains for future rematch prevention.
         counts = store.get_pair_match_counts()
         assert len(counts) == 1
+
+
+def test_first_last_name_identity_ignores_case_and_spacing() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = str(Path(temp_dir) / "matching.sqlite")
+        store = DataStore(db_path=db_path)
+
+        store.add_participant(
+            Participant.from_signup(
+                name="Alice   Smith",
+                age=20,
+                is_emory_student=True,
+                gender="female",
+                attendance_experience=False,
+                ethnicity="Korean",
+                culture="East Asian",
+            )
+        )
+        update_result = store.add_participant(
+            Participant.from_signup(
+                name="  ALICE smith ",
+                age=25,
+                is_emory_student=False,
+                gender="female",
+                attendance_experience=True,
+                ethnicity="Korean",
+                culture="East Asian",
+            )
+        )
+
+        participants = store.list_participants()
+        assert len(participants) == 1
+        assert update_result["action"] == "updated"
+        assert participants[0].name == "ALICE smith"
+        assert participants[0].age == 25
+        assert participants[0].attendance_experience is True
+
+
+def test_cleanup_participants_deduplicates_by_first_last_name() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = str(Path(temp_dir) / "matching.sqlite")
+        secret = "cleanup-secret"
+        store = DataStore(db_path=db_path, controller_secret=secret)
+
+        p_old = Participant.from_signup(
+            name="Alice Smith",
+            age=20,
+            is_emory_student=True,
+            gender="female",
+            attendance_experience=False,
+            ethnicity="Korean",
+            culture="East Asian",
+        )
+        p_new = Participant.from_signup(
+            name="ALICE   smith",
+            age=22,
+            is_emory_student=False,
+            gender="female",
+            attendance_experience=True,
+            ethnicity="Korean",
+            culture="East Asian",
+        )
+        p_other = Participant.from_signup(
+            name="Bob Jones",
+            age=23,
+            is_emory_student=True,
+            gender="male",
+            attendance_experience=False,
+            ethnicity="Chinese",
+            culture="East Asian",
+        )
+
+        with store._connect() as conn:  # noqa: SLF001 - test fixture setup
+            conn.execute(
+                """
+                INSERT INTO participants (
+                    participant_id, name, name_key, age, is_emory_student, gender,
+                    attendance_experience, ethnicity, culture, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    p_old.participant_id,
+                    p_old.name,
+                    "alicesmith",
+                    p_old.age,
+                    int(p_old.is_emory_student),
+                    p_old.gender,
+                    int(p_old.attendance_experience),
+                    p_old.ethnicity,
+                    p_old.culture,
+                    p_old.created_at,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO participants (
+                    participant_id, name, name_key, age, is_emory_student, gender,
+                    attendance_experience, ethnicity, culture, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    p_new.participant_id,
+                    p_new.name,
+                    "alicesmith",
+                    p_new.age,
+                    int(p_new.is_emory_student),
+                    p_new.gender,
+                    int(p_new.attendance_experience),
+                    p_new.ethnicity,
+                    p_new.culture,
+                    p_new.created_at,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO participants (
+                    participant_id, name, name_key, age, is_emory_student, gender,
+                    attendance_experience, ethnicity, culture, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    p_other.participant_id,
+                    p_other.name,
+                    "bobjones",
+                    p_other.age,
+                    int(p_other.is_emory_student),
+                    p_other.gender,
+                    int(p_other.attendance_experience),
+                    p_other.ethnicity,
+                    p_other.culture,
+                    p_other.created_at,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO ingestion_records (source, record_key, participant_id, imported_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                ("source", "row1", p_old.participant_id, p_old.created_at),
+            )
+
+        summary = store.cleanup_duplicate_participants(secret)
+        assert summary["ok"] is True
+        assert summary["deleted_duplicate_participants"] == 1
+
+        participants = store.list_participants()
+        names = sorted(p.name for p in participants)
+        assert names == ["ALICE smith", "Bob Jones"]
+
+        with store._connect() as conn:  # noqa: SLF001 - test-only inspection
+            row = conn.execute(
+                "SELECT participant_id FROM ingestion_records WHERE source = ? AND record_key = ?",
+                ("source", "row1"),
+            ).fetchone()
+        assert row is not None
+        assert row["participant_id"] == p_new.participant_id

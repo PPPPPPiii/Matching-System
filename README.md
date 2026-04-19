@@ -59,6 +59,10 @@ python3 -m ngo_matching add-participant \
 with different case (for example `Alice` vs `alice`), the new submission
 overwrites the prior participant profile.
 
+Identity matching is based on first and last name, ignoring capitalization and
+extra spaces (for example `Alice Smith`, `ALICE smith`, and ` alice   SMITH `
+are treated as the same participant).
+
 ### 3. Update matching policy (controller only)
 
 ```bash
@@ -94,6 +98,13 @@ View one participant profile and full match history (case-insensitive by name):
 
 ```bash
 python3 -m ngo_matching participant-profile --name "alice"
+```
+
+Clean duplicate participants by first+last-name identity (controller only):
+
+```bash
+python3 -m ngo_matching cleanup-participants \
+  --controller-key "super-secret-key"
 ```
 
 ### 5. Import participants from Google Form responses
