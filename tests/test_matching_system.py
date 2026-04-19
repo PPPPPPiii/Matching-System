@@ -592,3 +592,36 @@ def test_cleanup_participants_deduplicates_by_first_last_name() -> None:
             ).fetchone()
         assert row is not None
         assert row["participant_id"] == p_new.participant_id
+
+
+def test_find_current_group_for_name_and_controller_view() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = str(Path(temp_dir) / "matching.sqlite")
+        secret = "controller-secret"
+        store = DataStore(db_path=db_path, controller_secret=secret)
+        engine = MatchingEngine(store)
+
+        store.add_participant(
+            _participant("Alice Smith", 22, "female", False, "Korean", "East Asian")
+        )
+        store.add_participant(
+            _participant("Bob Jones", 23, "male", True, "Chinese", "East Asian")
+        )
+        _ = engine.run_round()
+
+        group = store.get_current_table_assignment("  alice   smith ")
+        assert group is not None
+        assert group["table_number"] == 1
+        assert "Alice Smith" in {m["name"] for m in group["members"]}
+        assert "Bob Jones" in {m["name"] for m in group["members"]}
+
+        assert store.verify_controller_key(secret) is True
+        controller_table = store.list_current_matching_groups()
+        assert len(controller_table) == 1
+        assert controller_table[0]["table_number"] == 1
+        assert {m["name"] for m in controller_table[0]["members"]} == {
+            "Alice Smith",
+            "Bob Jones",
+        }
+
+        assert store.verify_controller_key("wrong") is False

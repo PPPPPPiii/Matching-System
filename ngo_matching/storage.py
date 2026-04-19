@@ -269,6 +269,9 @@ class DataStore:
             return False
         return row["secret_hash"] == _hash_secret(controller_secret)
 
+    def verify_controller_key(self, controller_secret: str) -> bool:
+        return self._verify_controller(controller_secret)
+
     def _find_participant_by_name_ci(
         self, conn: sqlite3.Connection, name: str
     ) -> Optional[sqlite3.Row]:
@@ -590,6 +593,127 @@ class DataStore:
                 """
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def list_current_matching_groups(self) -> List[Dict[str, Any]]:
+        rows = self.list_current_matching_table()
+        grouped: Dict[Tuple[int, int], Dict[str, Any]] = {}
+        for row in rows:
+            key = (int(row["round_id"]), int(row["group_index"]))
+            entry = grouped.get(key)
+            if entry is None:
+                entry = {
+                    "round_id": int(row["round_id"]),
+                    "table_number": int(row["group_index"]),
+                    "group_size": int(row["group_size"]),
+                    "score": float(row["score"]),
+                    "members": [],
+                }
+                grouped[key] = entry
+            entry["members"].append(
+                {
+                    "participant_id": row["participant_id"],
+                    "name": row["name"],
+                    "member_order": int(row["member_order"]),
+                }
+            )
+
+        results = list(grouped.values())
+        for group in results:
+            group["members"].sort(key=lambda item: item["member_order"])
+        results.sort(key=lambda item: item["table_number"])
+        return results
+
+    def get_current_table_assignment(self, name: str) -> Optional[Dict[str, Any]]:
+        key = _name_key(name)
+        if not key:
+            return None
+
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT cmt.round_id, cmt.group_index, cmt.group_size, cmt.score
+                FROM current_matching_table cmt
+                JOIN participants p ON p.participant_id = cmt.participant_id
+                WHERE p.name_key = ?
+                ORDER BY cmt.round_id DESC
+                LIMIT 1
+                """,
+                (key,),
+            ).fetchone()
+            if row is None:
+                return None
+
+            member_rows = conn.execute(
+                """
+                SELECT p.participant_id, p.name, cmt.member_order
+                FROM current_matching_table cmt
+                JOIN participants p ON p.participant_id = cmt.participant_id
+                WHERE cmt.round_id = ? AND cmt.group_index = ?
+                ORDER BY cmt.member_order ASC
+                """,
+                (int(row["round_id"]), int(row["group_index"])),
+            ).fetchall()
+
+        return {
+            "round_id": int(row["round_id"]),
+            "table_number": int(row["group_index"]),
+            "group_size": int(row["group_size"]),
+            "score": float(row["score"]),
+            "members": [dict(member_row) for member_row in member_rows],
+        }
+
+    # Backward-compatible method names used by web/tests.
+    def find_current_group_for_name(self, name: str) -> Optional[Dict[str, Any]]:
+        assignment = self.get_current_table_assignment(name)
+        if assignment is None:
+            return None
+        return {
+            "round_id": assignment["round_id"],
+            "group_index": assignment["table_number"],
+            "group_size": assignment["group_size"],
+            "score": assignment["score"],
+            "members": [member["name"] for member in assignment["members"]],
+        }
+
+    def find_table_for_participant_name(self, name: str) -> Optional[Dict[str, Any]]:
+        assignment = self.get_current_table_assignment(name)
+        if assignment is None:
+            return None
+        key = _name_key(name)
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT name
+                FROM participants
+                WHERE name_key = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (key,),
+            ).fetchone()
+        display_name = row["name"] if row is not None else name.strip()
+        return {
+            "name": display_name,
+            "group_index": assignment["table_number"],
+            "members": [member["name"] for member in assignment["members"]],
+        }
+
+    def get_full_current_matching_table(
+        self, controller_secret: str
+    ) -> Optional[List[Dict[str, Any]]]:
+        if not self._verify_controller(controller_secret):
+            return None
+        groups = self.list_current_matching_groups()
+        return [
+            {
+                "round_id": group["round_id"],
+                "group_index": group["table_number"],
+                "group_size": group["group_size"],
+                "score": group["score"],
+                "members": [member["name"] for member in group["members"]],
+            }
+            for group in groups
+        ]
 
     def get_participant_profile(self, name: str) -> Optional[Dict[str, Any]]:
         with self._connect() as conn:

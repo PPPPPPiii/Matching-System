@@ -15,6 +15,7 @@ from ngo_matching.google_forms import (
 from ngo_matching.matcher import MatchingEngine
 from ngo_matching.models import MatchingPolicy, Participant, parse_bool
 from ngo_matching.storage import DataStore
+from ngo_matching.web import run_web_app
 
 
 DEFAULT_DB = Path("data/ngo_matching.db")
@@ -293,6 +294,10 @@ def cleanup_participants(args: argparse.Namespace) -> None:
     print(json.dumps(result, indent=2))
 
 
+def run_web(args: argparse.Namespace) -> None:
+    run_web_app(db_path=args.db_path, host=args.host, port=args.port)
+
+
 def import_google_form(args: argparse.Namespace) -> None:
     repo = _repo_from_path(args.db_path)
     csv_url = args.csv_url if args.csv_url else build_public_csv_url(args.sheet_url)
@@ -400,6 +405,11 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup_cmd = subparsers.add_parser("cleanup-participants")
     cleanup_cmd.add_argument("--controller-key", required=True)
     cleanup_cmd.set_defaults(func=cleanup_participants)
+
+    web_cmd = subparsers.add_parser("run-web")
+    web_cmd.add_argument("--host", default="127.0.0.1")
+    web_cmd.add_argument("--port", type=int, default=8080)
+    web_cmd.set_defaults(func=run_web)
 
     import_cmd = subparsers.add_parser("import-google-form")
     import_source_group = import_cmd.add_mutually_exclusive_group(required=True)

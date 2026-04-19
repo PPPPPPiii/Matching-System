@@ -134,6 +134,23 @@ Expected Google Form column names (case-insensitive):
 
 Import is idempotent: previously imported response rows are skipped on re-run.
 
+### 6. Run the HTML website
+
+Start the local web interface:
+
+```bash
+python3 -m ngo_matching run-web --host 127.0.0.1 --port 8000
+```
+
+Then open `http://127.0.0.1:8000` in your browser.
+
+- Participant login:
+  - Enter name in the password field (name matching is case-insensitive using first+last identity).
+  - The page returns that participant's table number in the current matching table.
+- Controller login:
+  - Enter the controller key.
+  - The page shows the full matching table with all table numbers and members.
+
 Run with `--json` for machine-readable output.
 
 ## Testing
