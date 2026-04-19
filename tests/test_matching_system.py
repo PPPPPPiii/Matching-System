@@ -217,6 +217,30 @@ def test_sheet_import_header_keyword_detection_and_country_normalization() -> No
         assert p2.attendance_experience is True
 
 
+def test_sheet_import_detects_question_style_gender_header() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        csv_path = Path(temp_dir) / "participants_gender_question.csv"
+        csv_path.write_text(
+            "\n".join(
+                [
+                    "Full Name,Countries of Citizen,Nationalities/Culture identified as,Are you a woman/female?,Emory Student or Not,First Time or Not,Age",
+                    "Alice Smith,America,East Asian,Yes,Yes,Yes,22",
+                    "Bob Jones,United States,east asian,No,True,False,23",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        parsed = parse_uploaded_sheet(str(csv_path))
+        assert len(parsed) == 2
+        p1 = parsed[0][1]
+        p2 = parsed[1][1]
+        assert p1.gender.lower() == "yes"
+        assert p2.gender.lower() == "no"
+        assert p1.ethnicity == "united states"
+        assert p2.ethnicity == "united states"
+
+
 def test_sheet_import_requires_characteristic_columns() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         csv_path = Path(temp_dir) / "bad.csv"
