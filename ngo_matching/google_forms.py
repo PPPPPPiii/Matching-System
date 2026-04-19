@@ -17,7 +17,15 @@ class GoogleFormImportError(ValueError):
 
 
 def _normalize_header(value: str) -> str:
-    return " ".join(re.findall(r"[a-z0-9]+", value.lower()))
+    raw_tokens = re.findall(r"[a-z0-9]+", value.lower())
+    token_aliases = {
+        "countries": "country",
+        "nationalities": "nationality",
+        "cultures": "culture",
+        "citizens": "citizen",
+    }
+    tokens = [token_aliases.get(token, token) for token in raw_tokens]
+    return " ".join(tokens)
 
 
 def _record_key(source: str, row: Dict[str, str]) -> str:
@@ -36,6 +44,19 @@ def _detect_column_indices(headers: Sequence[str]) -> Dict[str, int]:
     normalized = [_normalize_header(header) for header in headers]
     token_sets = [set(value.split()) for value in normalized]
 
+    # "Name" should map to full-name only when it is not first/last variants.
+    full_name_idx = -1
+    full_name_score = -1
+    for index, tokens in enumerate(token_sets):
+        if "name" not in tokens:
+            continue
+        if tokens.intersection({"first", "last", "given", "family", "surname"}):
+            continue
+        score = 2 if {"full", "name"}.issubset(tokens) else 1
+        if score > full_name_score:
+            full_name_score = score
+            full_name_idx = index
+
     def find_column(candidates: Sequence[Sequence[str]]) -> int:
         best_index = -1
         best_score = -1
@@ -48,7 +69,6 @@ def _detect_column_indices(headers: Sequence[str]) -> Dict[str, int]:
                         best_index = index
         return best_index
 
-    full_name_idx = find_column((("full", "name"), ("name",)))
     first_name_idx = find_column((("first", "name"), ("given", "name")))
     last_name_idx = find_column((("last", "name"), ("family", "name"), ("surname",)))
     country_idx = find_column(
