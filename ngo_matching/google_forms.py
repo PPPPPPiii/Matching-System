@@ -249,6 +249,7 @@ def parse_uploaded_sheet(
     file_path: str,
     *,
     default_age: int = 21,
+    skip_incomplete_rows: bool = True,
 ) -> List[Tuple[str, Participant]]:
     matrix = _read_sheet_matrix(file_path)
     if not matrix:
@@ -261,6 +262,7 @@ def parse_uploaded_sheet(
     columns = _detect_column_indices(headers)
     source = str(Path(file_path).resolve())
     parsed: List[Tuple[str, Participant]] = []
+    skipped_incomplete = 0
 
     for row_index, row in enumerate(matrix[1:], start=2):
         if not any((cell or "").strip() for cell in row):
@@ -274,12 +276,30 @@ def parse_uploaded_sheet(
             last_name = _cell(row, columns["last_name"])
             name = f"{first_name} {last_name}".strip()
         if not name:
+            if skip_incomplete_rows:
+                skipped_incomplete += 1
+                continue
             raise GoogleFormImportError(f"Row {row_index}: missing participant name.")
 
         raw_first_time = _cell(row, columns["first_time"])
         if not raw_first_time:
+            if skip_incomplete_rows:
+                skipped_incomplete += 1
+                continue
             raise GoogleFormImportError(
                 f"Row {row_index}: missing first-time/attended-before value."
+            )
+        raw_country = _cell(row, columns["country"])
+        raw_culture = _cell(row, columns["culture"])
+        raw_gender = _cell(row, columns["gender"])
+        raw_emory_status = _cell(row, columns["is_emory_student"])
+        if not (raw_country and raw_culture and raw_gender and raw_emory_status):
+            if skip_incomplete_rows:
+                skipped_incomplete += 1
+                continue
+            raise GoogleFormImportError(
+                f"Row {row_index}: missing one or more required fields "
+                "(country/culture/gender/emory-student)."
             )
         header_for_first_time = headers[columns["first_time"]]
         first_time = _parse_first_time_value(header_for_first_time, raw_first_time)
@@ -290,18 +310,18 @@ def parse_uploaded_sheet(
         participant = Participant.from_signup(
             name=name,
             age=age,
-            is_emory_student=_parse_student_or_scholar_value(
-                _cell(row, columns["is_emory_student"])
-            ),
-            gender=_cell(row, columns["gender"]),
+            is_emory_student=_parse_student_or_scholar_value(raw_emory_status),
+            gender=raw_gender,
             attendance_experience=(not first_time),
-            ethnicity=_cell(row, columns["country"]),
-            culture=_cell(row, columns["culture"]),
+            ethnicity=raw_country,
+            culture=raw_culture,
         )
         parsed.append((_record_key(source, row_dict), participant))
 
+    parse_uploaded_sheet.last_skipped_incomplete = skipped_incomplete
     return parsed
 
 
 # Backward compatible aliases
 parse_google_form_rows = parse_uploaded_sheet
+parse_uploaded_sheet.last_skipped_incomplete = 0

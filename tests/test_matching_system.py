@@ -310,6 +310,27 @@ def test_sheet_import_requires_characteristic_columns() -> None:
             assert "Unable to detect required columns" in str(exc)
 
 
+def test_sheet_import_skips_incomplete_rows_instead_of_failing() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        csv_path = Path(temp_dir) / "incomplete_rows.csv"
+        csv_path.write_text(
+            "\n".join(
+                [
+                    "What is your first and last name?,Which countries are you a citizen of?,Which nationalities and/or cultures do you identify with?,Are you a woman/female?,Are you a student or scholar?,Is this your first time coming to the one-on-one crosscultural conversations at the Intown Coffeehouse?",
+                    "Alice Smith,United States,USA,No,\"No, I am not a university student or scholar\",No",
+                    "Gregory,,,,,",
+                    "Bob Jones,Japan,Japanese,Yes,\"Yes, I am an Emory undergrad student\",Yes",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        parsed = parse_uploaded_sheet(str(csv_path))
+        assert len(parsed) == 2
+        names = [participant.name for _, participant in parsed]
+        assert names == ["Alice Smith", "Bob Jones"]
+
+
 def test_odd_participants_produce_triad() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = str(Path(temp_dir) / "matching.sqlite")
