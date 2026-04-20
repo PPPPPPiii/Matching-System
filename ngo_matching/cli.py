@@ -347,6 +347,7 @@ def import_sheet(args: argparse.Namespace) -> None:
                 "rows_read": len(parsed),
                 "imported": imported,
                 "skipped_existing": skipped,
+                "skipped_incomplete": parse_uploaded_sheet.last_skipped_incomplete,
             },
             indent=2,
         )
