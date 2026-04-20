@@ -23,6 +23,10 @@ def _normalize_header(value: str) -> str:
         "nationalities": "nationality",
         "cultures": "culture",
         "citizens": "citizen",
+        "women": "woman",
+        "men": "man",
+        "scholars": "scholar",
+        "students": "student",
     }
     tokens = [token_aliases.get(token, token) for token in raw_tokens]
     return " ".join(tokens)
@@ -88,8 +92,25 @@ def _detect_column_indices(headers: Sequence[str]) -> Dict[str, int]:
             ("identify", "as"),
         )
     )
-    gender_idx = find_column((("gender",), ("sex",)))
-    emory_idx = find_column((("emory", "student"), ("emory",)))
+    gender_idx = find_column(
+        (
+            ("gender",),
+            ("sex",),
+            ("woman",),
+            ("female",),
+            ("man",),
+            ("male",),
+        )
+    )
+    emory_idx = find_column(
+        (
+            ("emory", "student"),
+            ("emory",),
+            ("student", "scholar"),
+            ("student",),
+            ("scholar",),
+        )
+    )
     first_time_idx = find_column(
         (
             ("first", "time"),
