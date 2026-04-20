@@ -48,15 +48,26 @@ def _detect_column_indices(headers: Sequence[str]) -> Dict[str, int]:
     normalized = [_normalize_header(header) for header in headers]
     token_sets = [set(value.split()) for value in normalized]
 
-    # "Name" should map to full-name only when it is not first/last variants.
+    # "Name" can be plain full-name or question-style phrasing that includes
+    # first+last in one column (e.g., "What is your first and last name?").
     full_name_idx = -1
     full_name_score = -1
     for index, tokens in enumerate(token_sets):
         if "name" not in tokens:
             continue
-        if tokens.intersection({"first", "last", "given", "family", "surname"}):
+        has_split_name_markers = bool(
+            tokens.intersection({"first", "last", "given", "family", "surname"})
+        )
+        if has_split_name_markers and not (
+            {"first", "last", "name"}.issubset(tokens)
+        ):
             continue
-        score = 2 if {"full", "name"}.issubset(tokens) else 1
+        if {"full", "name"}.issubset(tokens):
+            score = 3
+        elif {"first", "last", "name"}.issubset(tokens):
+            score = 2
+        else:
+            score = 1
         if score > full_name_score:
             full_name_score = score
             full_name_idx = index
@@ -194,10 +205,44 @@ def _cell(row: Sequence[str], idx: int) -> str:
 
 
 def _parse_first_time_value(header_text: str, raw_value: str) -> bool:
-    value = parse_bool(raw_value)
+    normalized_value = _normalize_header(raw_value)
+    value_tokens = set(normalized_value.split())
+    if value_tokens.intersection({"yes", "y", "true", "1"}):
+        value = True
+    elif value_tokens.intersection({"no", "n", "false", "0"}):
+        value = False
+    elif "first" in value_tokens and "time" in value_tokens:
+        value = True
+    elif "not" in value_tokens and "first" in value_tokens:
+        value = False
+    else:
+        value = parse_bool(raw_value)
+
     tokens = set(_normalize_header(header_text).split())
     attended_before_style = "before" in tokens or "experience" in tokens or "returning" in tokens
     return (not value) if attended_before_style else value
+
+
+def _parse_student_or_scholar_value(raw_value: str) -> bool:
+    normalized_value = _normalize_header(raw_value)
+    value_tokens = set(normalized_value.split())
+
+    if value_tokens.intersection({"yes", "y", "true", "1"}):
+        return True
+    if value_tokens.intersection({"no", "n", "false", "0"}):
+        return False
+
+    # Phrase-style survey responses such as:
+    # "No, I am not a university student or scholar"
+    # "Yes, I am an Emory undergrad student"
+    has_positive_student_marker = bool(
+        value_tokens.intersection({"student", "scholar", "undergrad", "undergraduate", "grad", "graduate"})
+    )
+    has_negative_marker = "not" in value_tokens or "no" in value_tokens
+    if has_positive_student_marker:
+        return not has_negative_marker
+
+    return parse_bool(raw_value)
 
 
 def parse_uploaded_sheet(
@@ -245,7 +290,9 @@ def parse_uploaded_sheet(
         participant = Participant.from_signup(
             name=name,
             age=age,
-            is_emory_student=_cell(row, columns["is_emory_student"]),
+            is_emory_student=_parse_student_or_scholar_value(
+                _cell(row, columns["is_emory_student"])
+            ),
             gender=_cell(row, columns["gender"]),
             attendance_experience=(not first_time),
             ethnicity=_cell(row, columns["country"]),

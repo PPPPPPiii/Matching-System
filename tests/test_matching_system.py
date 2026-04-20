@@ -263,6 +263,34 @@ def test_sheet_import_detects_student_or_scholar_header_for_emory_status() -> No
         assert p2.is_emory_student is False
 
 
+def test_sheet_import_detects_question_style_name_header() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        csv_path = Path(temp_dir) / "participants_question_style_name.csv"
+        csv_path.write_text(
+            "\n".join(
+                [
+                    "What is your first and last name?,Which countries are you a citizen of?,Which nationalities and/or cultures do you identify with?,Are you a woman/female?,Are you a student or scholar?,Is this your first time coming to the one-on-one crosscultural conversations at the Int?",
+                    "Alice Smith,United States,USA,No,\"No, I am not a university student or scholar\",No",
+                    "Bob Jones,Japan,Japanese,yes,\"Yes, I am an Emory undergrad student\",Yes",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        parsed = parse_uploaded_sheet(str(csv_path))
+        assert len(parsed) == 2
+        p1 = parsed[0][1]
+        p2 = parsed[1][1]
+        assert p1.name == "Alice Smith"
+        assert p2.name == "Bob Jones"
+        assert p1.is_emory_student is False
+        assert p2.is_emory_student is True
+        assert p1.attendance_experience is True
+        assert p2.attendance_experience is False
+        assert p1.ethnicity == "united states"
+        assert p1.culture == "united states"
+
+
 def test_sheet_import_requires_characteristic_columns() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         csv_path = Path(temp_dir) / "bad.csv"
